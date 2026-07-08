@@ -42,31 +42,55 @@ def _resolve_description_html(description_html: str | None, description_stripped
 
 
 def _item_value(item: dict[str, Any], field: str) -> Any:
+    normalized = field.lower()
     aliases = {
-        "project": "project_id",
+        "project": "project",
+        "project_id": "project",
         "type": "type_id",
         "state": "state",
         "state_id": "state",
         "stategroup": "state",
         "state__group": "state",
         "assignee": "assignees",
+        "assignees__id": "assignees",
         "label": "labels",
+        "labels__id": "labels",
+        "duedate": "target_date",
+        "startdate": "start_date",
+        "createdat": "created_at",
+        "updatedat": "updated_at",
+        "isdraft": "is_draft",
     }
-    key = aliases.get(field.lower(), field)
+    key = aliases.get(normalized, field)
     value = item.get(key)
-    if field.lower() in {"state", "state_id"} and isinstance(value, dict):
+    if normalized in {"state", "state_id"} and isinstance(value, dict):
         return value.get("id")
-    if field.lower() in {"stategroup", "state__group"} and isinstance(value, dict):
+    if normalized in {"stategroup", "state__group"} and isinstance(value, dict):
         return value.get("group")
-    if field.lower() == "assignee" and isinstance(value, list):
+    if normalized in {"assignee", "assignees__id"} and isinstance(value, list):
         return [entry.get("id") if isinstance(entry, dict) else entry for entry in value]
-    if field.lower() == "label" and isinstance(value, list):
+    if normalized in {"label", "labels__id"} and isinstance(value, list):
         return [entry.get("id") if isinstance(entry, dict) else entry for entry in value]
+    if normalized == "isarchived":
+        return item.get("archived_at") is not None
     return value
 
 
-def _pql_literal(value: str) -> Any:
+def _current_user_id(client: Any, pql: str) -> str | None:
+    if "currentUser()" not in pql:
+        return None
+    user = client.users.get_me()
+    if hasattr(user, "id"):
+        return user.id
+    if isinstance(user, dict):
+        return user.get("id")
+    return None
+
+
+def _pql_literal(value: str, current_user_id: str | None = None) -> Any:
     value = value.strip()
+    if value == "currentUser()":
+        return current_user_id
     if value.lower() == "true":
         return True
     if value.lower() == "false":
@@ -74,10 +98,29 @@ def _pql_literal(value: str) -> Any:
     return value.strip('"\'')
 
 
+def _pql_values(value: str, current_user_id: str | None = None) -> list[Any]:
+    value = value.strip()
+    functions = {
+        "openStates()": ["backlog", "unstarted", "started"],
+        "closedStates()": ["completed", "cancelled"],
+        "activeStates()": ["unstarted", "started"],
+        "currentUser()": [current_user_id],
+    }
+    if value in functions:
+        return functions[value]
+    if (value.startswith("[") and value.endswith("]")) or (value.startswith("(") and value.endswith(")")):
+        value = value[1:-1]
+    return [
+        _pql_literal(raw_value, current_user_id)
+        for raw_value in re.findall(r"\"[^\"]*\"|'[^']*'|[^,]+", value)
+        if raw_value.strip()
+    ]
+
+
 def _supports_simple_pql(pql: str) -> bool:
     for part in re.split(r"\s+AND\s+", pql, flags=re.IGNORECASE):
-        part = part.strip().strip("()")
-        if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+IN\s+\[(.*)\]", part, flags=re.IGNORECASE):
+        part = part.strip()
+        if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+(NOT\s+)?IN\s+(.+)", part, flags=re.IGNORECASE):
             continue
         if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", part):
             continue
@@ -87,28 +130,30 @@ def _supports_simple_pql(pql: str) -> bool:
     return True
 
 
-def _match_simple_pql(item: dict[str, Any], pql: str) -> bool:
+def _match_simple_pql(item: dict[str, Any], pql: str, current_user_id: str | None = None) -> bool:
     for part in re.split(r"\s+AND\s+", pql, flags=re.IGNORECASE):
-        part = part.strip().strip("()")
-        in_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+IN\s+\[(.*)\]", part, flags=re.IGNORECASE)
+        part = part.strip()
+        in_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+(NOT\s+)?IN\s+(.+)", part, flags=re.IGNORECASE)
         eq_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", part)
         contains_match = re.fullmatch(r"(title|name)\s*~\s*(.+)", part, flags=re.IGNORECASE)
         if in_match:
-            field, raw_values = in_match.groups()
-            expected = [_pql_literal(value) for value in raw_values.split(",") if value.strip()]
+            field, not_operator, raw_values = in_match.groups()
+            expected = _pql_values(raw_values, current_user_id)
             actual = _item_value(item, field)
             if isinstance(actual, list):
                 ok = any(value in expected for value in actual)
             else:
                 ok = actual in expected
+            if not_operator:
+                ok = not ok
         elif eq_match:
             field, raw_value = eq_match.groups()
-            expected = _pql_literal(raw_value)
+            expected = _pql_literal(raw_value, current_user_id)
             actual = _item_value(item, field)
             ok = expected in actual if isinstance(actual, list) else actual == expected
         elif contains_match:
             field, raw_value = contains_match.groups()
-            expected = str(_pql_literal(raw_value)).lower()
+            expected = str(_pql_literal(raw_value, current_user_id)).lower()
             actual = str(_item_value(item, field) or "").lower()
             ok = expected in actual
         else:
@@ -206,7 +251,8 @@ def _local_pql_response(
         external_id,
         external_source,
     )
-    filtered = [item for item in results if _match_simple_pql(item, pql)]
+    current_user_id = _current_user_id(client, pql)
+    filtered = [item for item in results if _match_simple_pql(item, pql, current_user_id)]
     limit = per_page or 25
     return {
         "results": filtered[:limit],
@@ -298,19 +344,29 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         """
         client, workspace_slug = get_plane_client_context()
 
-        if pql and _supports_simple_pql(pql):
-            return _local_pql_response(
-                client,
-                workspace_slug,
-                project_id,
-                pql,
-                order_by,
-                per_page,
-                expand,
-                fields,
-                external_id,
-                external_source,
-            )
+        if pql:
+            if _supports_simple_pql(pql):
+                return _local_pql_response(
+                    client,
+                    workspace_slug,
+                    project_id,
+                    pql,
+                    order_by,
+                    per_page,
+                    expand,
+                    fields,
+                    external_id,
+                    external_source,
+                )
+            return {
+                "error": "unsupported_pql_on_self_host_v1_3_1",
+                "failed_pql": pql,
+                "pql_reference": PQL_FULL_REFERENCE,
+                "hint": (
+                    "Use simple filters with =, IN (...), NOT IN (...), title/name ~, joined by AND. "
+                    "Plane self-host v1.3.1 ignores unsupported PQL, so this MCP refuses to pass it through."
+                ),
+            }
 
         params = WorkItemQueryParams(
             pql=pql,
@@ -390,7 +446,17 @@ def register_work_item_tools(mcp: FastMCP) -> None:
                 ISO dates for target_date/start_date, "None" for unset values.
         """
         client, workspace_slug = get_plane_client_context()
-        if project_id or (pql and _supports_simple_pql(pql)):
+        if pql and not _supports_simple_pql(pql):
+            return {
+                "error": "unsupported_pql_on_self_host_v1_3_1",
+                "failed_pql": pql,
+                "pql_reference": PQL_FULL_REFERENCE,
+                "hint": (
+                    "Use simple filters with =, IN (...), NOT IN (...), title/name ~, joined by AND. "
+                    "Plane self-host v1.3.1 ignores unsupported PQL, so this MCP refuses to pass it through."
+                ),
+            }
+        if project_id or pql:
             if project_id is None:
                 return {
                     "error": "workspace_count_unavailable_on_self_host_v1_3_1",
@@ -399,8 +465,9 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             items = _fetch_work_items(
                 client, workspace_slug, project_id, None, "assignees,labels,state", None, None, None
             )
-            if pql and _supports_simple_pql(pql):
-                items = [item for item in items if _match_simple_pql(item, pql)]
+            if pql:
+                current_user_id = _current_user_id(client, pql)
+                items = [item for item in items if _match_simple_pql(item, pql, current_user_id)]
             return _count_items(items, group_by, sub_group_by)
         params = WorkItemCountQueryParams(pql=pql, group_by=group_by, sub_group_by=sub_group_by)
         try:
