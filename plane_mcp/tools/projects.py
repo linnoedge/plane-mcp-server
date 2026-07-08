@@ -38,14 +38,19 @@ def register_project_tools(mcp: FastMCP) -> None:
         order_by: str | None = None,
     ) -> PaginatedProjectLiteResponse:
         """
-        List projects in a workspace (lite, paginated).
+        List projects in a workspace (paginated).
 
-        Trimmed fields: id, identifier, name, description, emoji, icon_prop,
-        cover_image, cover_image_url, archived_at. For full detail use retrieve_project.
+        Use this primarily to resolve a project ID from its identifier/name. Prefer small pages
+        (per_page 5-20) and inspect only id, identifier, name, description, and archived_at from
+        each result. Call retrieve_project only when full project configuration is needed.
+
+        On Plane self-host v1.3.1, the lite endpoint is missing and this tool falls back to the
+        full project list endpoint, which can return many fields per project. Avoid per_page=1000
+        unless the user explicitly asks for the full project inventory.
 
         Args:
             cursor: Prior response's next_cursor; omit for first page.
-            per_page: Results per page (1-1000, default 1000).
+            per_page: Results per page (1-1000). Prefer 5-20 to reduce context usage.
             order_by: Sort field; prefix '-' for descending.
 
         Returns:
