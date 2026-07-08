@@ -3,6 +3,7 @@
 from typing import Any
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
 from plane.models.pages import CreatePage, Page
 from plane.models.work_item_pages import CreateWorkItemPage, WorkItemPage
 
@@ -30,13 +31,18 @@ def register_page_tools(mcp: FastMCP) -> None:
             List of Page objects
         """
         client, workspace_slug = get_plane_client_context()
-        if project_id is not None:
-            response = client.pages.list_project_pages(
-                workspace_slug=workspace_slug, project_id=project_id, params=params
-            )
-        else:
-            response = client.pages.list_workspace_pages(workspace_slug=workspace_slug, params=params)
-        return response.results
+        try:
+            if project_id is not None:
+                response = client.pages.list_project_pages(
+                    workspace_slug=workspace_slug, project_id=project_id, params=params
+                )
+            else:
+                response = client.pages.list_workspace_pages(workspace_slug=workspace_slug, params=params)
+            return response.results
+        except HttpError as e:
+            if e.status_code == 404:
+                return []
+            raise
 
     @mcp.tool()
     def attach_page_to_work_item(

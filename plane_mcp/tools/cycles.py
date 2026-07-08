@@ -16,10 +16,16 @@ from plane.models.cycles import (
     UpdateCycle,
 )
 from plane.models.enums import CycleStatusEnum
-from plane.models.query_params import CycleLiteListQueryParams, LiteListQueryParams, WorkItemQueryParams
+from plane.models.query_params import (
+    CycleListQueryParams,
+    CycleLiteListQueryParams,
+    LiteListQueryParams,
+    WorkItemQueryParams,
+)
 from pydantic import Field
 
 from plane_mcp.client import get_plane_client_context
+from plane_mcp.tools._compat import paginated_payload
 from plane_mcp.tools.pql_reference import PQL_FIELD_HINT, PQL_FULL_REFERENCE
 
 logger = get_logger(__name__)
@@ -64,7 +70,21 @@ def register_cycle_tools(mcp: FastMCP) -> None:
                 params=params.model_dump(exclude_none=True),
             )
         params = CycleLiteListQueryParams(cursor=cursor, per_page=per_page, order_by=order_by, status=status)
-        return client.cycles.list_lite(workspace_slug=workspace_slug, project_id=project_id, params=params)
+        try:
+            return client.cycles.list_lite(workspace_slug=workspace_slug, project_id=project_id, params=params)
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            response = client.cycles.list(
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                params=CycleListQueryParams(cursor=cursor, per_page=per_page, order_by=order_by, status=status),
+            )
+            if isinstance(response, list):
+                response = {**paginated_payload(response)}
+            else:
+                response = response.model_dump()
+            return PaginatedCycleLiteResponse.model_validate(response)
 
     @mcp.tool()
     def create_cycle(

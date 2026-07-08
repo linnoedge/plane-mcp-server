@@ -3,6 +3,7 @@
 from typing import Any
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
 from plane.models.milestones import (
     CreateMilestone,
     Milestone,
@@ -34,10 +35,15 @@ def register_milestone_tools(mcp: FastMCP) -> None:
             List of Milestone objects
         """
         client, workspace_slug = get_plane_client_context()
-        response: PaginatedMilestoneResponse = client.milestones.list(
-            workspace_slug=workspace_slug, project_id=project_id, params=params
-        )
-        return response.results
+        try:
+            response: PaginatedMilestoneResponse = client.milestones.list(
+                workspace_slug=workspace_slug, project_id=project_id, params=params
+            )
+            return response.results
+        except HttpError as e:
+            if e.status_code == 404:
+                return []
+            raise
 
     @mcp.tool()
     def create_milestone(

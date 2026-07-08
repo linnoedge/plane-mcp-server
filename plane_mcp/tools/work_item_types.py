@@ -3,6 +3,7 @@
 from typing import Any
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
 from plane.models.projects import ProjectFeature
 from plane.models.work_item_types import (
     CreateWorkItemType,
@@ -28,11 +29,16 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
         to look up custom property and option UUIDs for PQL cf[] filters.
         """
         client, workspace_slug = get_plane_client_context()
-        if project_id:
-            return client.work_item_types.list(
-                workspace_slug=workspace_slug, project_id=project_id, params=params
-            )
-        return client.workspace_work_item_types.list(workspace_slug=workspace_slug)
+        try:
+            if project_id:
+                return client.work_item_types.list(
+                    workspace_slug=workspace_slug, project_id=project_id, params=params
+                )
+            return client.workspace_work_item_types.list(workspace_slug=workspace_slug)
+        except HttpError as e:
+            if e.status_code == 404:
+                return []
+            raise
 
     @mcp.tool()
     def create_work_item_type(
@@ -142,13 +148,21 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
 
         if workspace_owns_types:
             in_project = next(
-                (t for t in client.work_item_types.list(workspace_slug=workspace_slug, project_id=project_id) if (t.name or "").strip() == target),
+                (
+                    t
+                    for t in client.work_item_types.list(workspace_slug=workspace_slug, project_id=project_id)
+                    if (t.name or "").strip() == target
+                ),
                 None,
             )
             if in_project is not None:
                 return in_project
             at_workspace = next(
-                (t for t in client.workspace_work_item_types.list(workspace_slug=workspace_slug) if (t.name or "").strip() == target),
+                (
+                    t
+                    for t in client.workspace_work_item_types.list(workspace_slug=workspace_slug)
+                    if (t.name or "").strip() == target
+                ),
                 None,
             )
             if at_workspace is None:
@@ -174,7 +188,11 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
             )
 
         existing = next(
-            (t for t in client.work_item_types.list(workspace_slug=workspace_slug, project_id=project_id) if (t.name or "").strip() == target),
+            (
+                t
+                for t in client.work_item_types.list(workspace_slug=workspace_slug, project_id=project_id)
+                if (t.name or "").strip() == target
+            ),
             None,
         )
         if existing is None:

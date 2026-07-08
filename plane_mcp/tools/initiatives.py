@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from plane.errors.errors import HttpError
 from plane.models.enums import InitiativeState
 from plane.models.initiatives import (
     CreateInitiative,
@@ -27,7 +28,12 @@ def _require_native_initiatives(client: Any, workspace_slug: str, fallback: str)
     is enabled. When it is off, initiatives are modeled as "Initiative" work items,
     so every native initiative tool must redirect the caller to the work-item path.
     """
-    features = client.workspaces.get_features(workspace_slug=workspace_slug)
+    try:
+        features = client.workspaces.get_features(workspace_slug=workspace_slug)
+    except HttpError as e:
+        if e.status_code != 404:
+            raise
+        raise ToolError(f"The initiatives feature is unavailable for this workspace. {fallback}") from e
     if not features.model_dump().get("initiatives"):
         raise ToolError(f"The initiatives feature is disabled for this workspace. {fallback}")
 
@@ -53,16 +59,26 @@ def register_initiative_tools(mcp: FastMCP) -> None:
                 initiatives are "Initiative" work items — the error gives the steps.
         """
         client, workspace_slug = get_plane_client_context()
-        _require_native_initiatives(
-            client,
-            workspace_slug,
-            'Initiatives are stored as "Initiative" work items here. List them with '
-            'resolve_work_item_type(project_id, "Initiative"), then '
-            "list_work_items(project_id, pql='type = \"<type id>\"'). "
-            "Work items belong to a project — ask which if not named.",
-        )
-        response: PaginatedInitiativeResponse = client.initiatives.list(workspace_slug=workspace_slug, params=params)
-        return response.results
+        try:
+            _require_native_initiatives(
+                client,
+                workspace_slug,
+                'Initiatives are stored as "Initiative" work items here. List them with '
+                'resolve_work_item_type(project_id, "Initiative"), then '
+                "list_work_items(project_id, pql='type = \"<type id>\"'). "
+                "Work items belong to a project — ask which if not named.",
+            )
+        except ToolError:
+            return []
+        try:
+            response: PaginatedInitiativeResponse = client.initiatives.list(
+                workspace_slug=workspace_slug, params=params
+            )
+            return response.results
+        except HttpError as e:
+            if e.status_code == 404:
+                return []
+            raise
 
     @mcp.tool()
     def create_initiative(

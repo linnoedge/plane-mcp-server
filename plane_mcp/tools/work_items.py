@@ -1,5 +1,6 @@
 """Work item-related tools for Plane MCP Server."""
 
+import re
 from html import escape
 from typing import Annotated, Any, get_args
 
@@ -38,6 +39,214 @@ def _resolve_description_html(description_html: str | None, description_stripped
     if description_stripped is not None:
         return "<p>" + escape(description_stripped).replace("\n", "<br/>") + "</p>"
     return None
+
+
+def _item_value(item: dict[str, Any], field: str) -> Any:
+    aliases = {
+        "project": "project_id",
+        "type": "type_id",
+        "state": "state",
+        "state_id": "state",
+        "stategroup": "state",
+        "state__group": "state",
+        "assignee": "assignees",
+        "label": "labels",
+    }
+    key = aliases.get(field.lower(), field)
+    value = item.get(key)
+    if field.lower() in {"state", "state_id"} and isinstance(value, dict):
+        return value.get("id")
+    if field.lower() in {"stategroup", "state__group"} and isinstance(value, dict):
+        return value.get("group")
+    if field.lower() == "assignee" and isinstance(value, list):
+        return [entry.get("id") if isinstance(entry, dict) else entry for entry in value]
+    if field.lower() == "label" and isinstance(value, list):
+        return [entry.get("id") if isinstance(entry, dict) else entry for entry in value]
+    return value
+
+
+def _pql_literal(value: str) -> Any:
+    value = value.strip()
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    return value.strip('"\'')
+
+
+def _supports_simple_pql(pql: str) -> bool:
+    for part in re.split(r"\s+AND\s+", pql, flags=re.IGNORECASE):
+        part = part.strip().strip("()")
+        if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+IN\s+\[(.*)\]", part, flags=re.IGNORECASE):
+            continue
+        if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", part):
+            continue
+        if re.fullmatch(r"(title|name)\s*~\s*(.+)", part, flags=re.IGNORECASE):
+            continue
+        return False
+    return True
+
+
+def _match_simple_pql(item: dict[str, Any], pql: str) -> bool:
+    for part in re.split(r"\s+AND\s+", pql, flags=re.IGNORECASE):
+        part = part.strip().strip("()")
+        in_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s+IN\s+\[(.*)\]", part, flags=re.IGNORECASE)
+        eq_match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", part)
+        contains_match = re.fullmatch(r"(title|name)\s*~\s*(.+)", part, flags=re.IGNORECASE)
+        if in_match:
+            field, raw_values = in_match.groups()
+            expected = [_pql_literal(value) for value in raw_values.split(",") if value.strip()]
+            actual = _item_value(item, field)
+            if isinstance(actual, list):
+                ok = any(value in expected for value in actual)
+            else:
+                ok = actual in expected
+        elif eq_match:
+            field, raw_value = eq_match.groups()
+            expected = _pql_literal(raw_value)
+            actual = _item_value(item, field)
+            ok = expected in actual if isinstance(actual, list) else actual == expected
+        elif contains_match:
+            field, raw_value = contains_match.groups()
+            expected = str(_pql_literal(raw_value)).lower()
+            actual = str(_item_value(item, field) or "").lower()
+            ok = expected in actual
+        else:
+            return True
+        if not ok:
+            return False
+    return True
+
+
+def _fetch_project_ids(client: Any, workspace_slug: str) -> list[str]:
+    ids = []
+    cursor = None
+    while True:
+        params = {"per_page": 100}
+        if cursor:
+            params["cursor"] = cursor
+        response = client.projects._get(f"{workspace_slug}/projects", params=params)
+        for project in response.get("results") or []:
+            project_id = project.get("id")
+            if project_id:
+                ids.append(project_id)
+        if not response.get("next_page_results") or not response.get("next_cursor"):
+            break
+        cursor = response.get("next_cursor")
+    return ids
+
+
+def _fetch_work_items(
+    client: Any,
+    workspace_slug: str,
+    project_id: str | None,
+    order_by: str | None,
+    expand: str | None,
+    fields: str | None,
+    external_id: str | None,
+    external_source: str | None,
+) -> list[dict[str, Any]]:
+    fetch_params = WorkItemQueryParams(
+        order_by=order_by,
+        per_page=100,
+        expand=expand,
+        fields=fields,
+        external_id=external_id,
+        external_source=external_source,
+    )
+    if project_id is None:
+        results = []
+        for fetched_project_id in _fetch_project_ids(client, workspace_slug):
+            results.extend(
+                _fetch_work_items(
+                    client,
+                    workspace_slug,
+                    fetched_project_id,
+                    order_by,
+                    expand,
+                    fields,
+                    external_id,
+                    external_source,
+                )
+            )
+        return results
+    results = []
+    while True:
+        response = client.work_items.list(
+            workspace_slug=workspace_slug, project_id=project_id, params=fetch_params
+        )
+        results.extend(
+            item.model_dump() if hasattr(item, "model_dump") else item for item in (response.results or [])
+        )
+        if not response.next_page_results or not response.next_cursor:
+            break
+        fetch_params.cursor = response.next_cursor
+    return results
+
+
+def _local_pql_response(
+    client: Any,
+    workspace_slug: str,
+    project_id: str | None,
+    pql: str,
+    order_by: str | None,
+    per_page: int | None,
+    expand: str | None,
+    fields: str | None,
+    external_id: str | None,
+    external_source: str | None,
+) -> dict[str, Any]:
+    results = _fetch_work_items(
+        client,
+        workspace_slug,
+        project_id,
+        order_by,
+        expand,
+        fields,
+        external_id,
+        external_source,
+    )
+    filtered = [item for item in results if _match_simple_pql(item, pql)]
+    limit = per_page or 25
+    return {
+        "results": filtered[:limit],
+        "total_count": len(filtered),
+        "count": min(len(filtered), limit),
+        "next_cursor": "",
+        "prev_cursor": "",
+        "next_page_results": len(filtered) > limit,
+        "prev_page_results": False,
+        "filter_mode": "local_pql_fallback",
+    }
+
+
+def _count_items(
+    items: list[dict[str, Any]], group_by: str | None, sub_group_by: str | None
+) -> dict[str, Any]:
+    if group_by is None:
+        return {
+            "grouped_by": None,
+            "sub_grouped_by": None,
+            "total_count": len(items),
+            "grouped_counts": {},
+            "count_mode": "local_fallback",
+        }
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = str(_item_value(item, group_by) or "None")
+        entry = grouped.setdefault(key, {"count": 0})
+        entry["count"] += 1
+        if sub_group_by is not None:
+            sub_key = str(_item_value(item, sub_group_by) or "None")
+            sub_counts = entry.setdefault("sub_grouped_counts", {})
+            sub_counts[sub_key] = {"count": sub_counts.get(sub_key, {}).get("count", 0) + 1}
+    return {
+        "grouped_by": group_by,
+        "sub_grouped_by": sub_group_by,
+        "total_count": len(items),
+        "grouped_counts": grouped,
+        "count_mode": "local_fallback",
+    }
 
 
 def register_work_item_tools(mcp: FastMCP) -> None:
@@ -89,6 +298,20 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         """
         client, workspace_slug = get_plane_client_context()
 
+        if pql and _supports_simple_pql(pql):
+            return _local_pql_response(
+                client,
+                workspace_slug,
+                project_id,
+                pql,
+                order_by,
+                per_page,
+                expand,
+                fields,
+                external_id,
+                external_source,
+            )
+
         params = WorkItemQueryParams(
             pql=pql,
             order_by=order_by,
@@ -137,6 +360,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def count_work_items(
+        project_id: str | None = None,
         pql: Annotated[str | None, Field(description=PQL_FIELD_HINT)] = None,
         group_by: str | None = None,
         sub_group_by: str | None = None,
@@ -166,6 +390,18 @@ def register_work_item_tools(mcp: FastMCP) -> None:
                 ISO dates for target_date/start_date, "None" for unset values.
         """
         client, workspace_slug = get_plane_client_context()
+        if project_id or (pql and _supports_simple_pql(pql)):
+            if project_id is None:
+                return {
+                    "error": "workspace_count_unavailable_on_self_host_v1_3_1",
+                    "hint": "Pass project_id so count_work_items can use the local fallback safely.",
+                }
+            items = _fetch_work_items(
+                client, workspace_slug, project_id, None, "assignees,labels,state", None, None, None
+            )
+            if pql and _supports_simple_pql(pql):
+                items = [item for item in items if _match_simple_pql(item, pql)]
+            return _count_items(items, group_by, sub_group_by)
         params = WorkItemCountQueryParams(pql=pql, group_by=group_by, sub_group_by=sub_group_by)
         try:
             response: WorkItemGroupedCountResponse = client.work_items.count_workspace(
@@ -180,6 +416,11 @@ def register_work_item_tools(mcp: FastMCP) -> None:
                     "failed_pql": pql,
                     "pql_reference": PQL_FULL_REFERENCE,
                     "hint": "The PQL above failed. Fix it using the reference and retry count_work_items.",
+                }
+            if e.status_code == 404:
+                return {
+                    "error": "workspace_count_unavailable_on_self_host_v1_3_1",
+                    "hint": "Pass project_id so count_work_items can use the local fallback safely.",
                 }
             raise
         return response.model_dump()
@@ -668,4 +909,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             order_by=order_by,
         )
 
-        return client.work_items.search(workspace_slug=workspace_slug, query=query, params=params)
+        search_params = {"search": query}
+        search_params.update(params.model_dump(exclude_none=True))
+        response = client.work_items._get(f"{workspace_slug}/work-items/search", params=search_params)
+        return WorkItemSearch.model_validate(response)

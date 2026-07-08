@@ -1,11 +1,13 @@
 """Workspace-related tools for Plane MCP Server."""
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
 from plane.models.projects import ProjectFeature
 from plane.models.query_params import MemberListQueryParams
 from plane.models.workspaces import PaginatedWorkspaceMemberResponse, WorkspaceFeature
 
 from plane_mcp.client import get_plane_client_context
+from plane_mcp.tools._compat import paginated_payload
 
 
 def register_workspace_tools(mcp: FastMCP) -> None:
@@ -52,7 +54,13 @@ def register_workspace_tools(mcp: FastMCP) -> None:
             per_page=per_page,
             order_by=order_by,
         )
-        return client.workspaces.get_members_lite(workspace_slug=workspace_slug, params=params)
+        try:
+            return client.workspaces.get_members_lite(workspace_slug=workspace_slug, params=params)
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            members = client.workspaces.get_members(workspace_slug=workspace_slug)
+            return PaginatedWorkspaceMemberResponse.model_validate(paginated_payload(members))
 
     @mcp.tool()
     def get_features(project_id: str | None = None) -> WorkspaceFeature | ProjectFeature:
@@ -69,9 +77,23 @@ def register_workspace_tools(mcp: FastMCP) -> None:
             ProjectFeature when project_id is given, otherwise WorkspaceFeature.
         """
         client, workspace_slug = get_plane_client_context()
-        if project_id is not None:
-            return client.projects.get_features(workspace_slug=workspace_slug, project_id=project_id)
-        return client.workspaces.get_features(workspace_slug=workspace_slug)
+        try:
+            if project_id is not None:
+                return client.projects.get_features(workspace_slug=workspace_slug, project_id=project_id)
+            return client.workspaces.get_features(workspace_slug=workspace_slug)
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            if project_id is not None:
+                return ProjectFeature()
+            return WorkspaceFeature(
+                project_grouping=False,
+                initiatives=False,
+                teams=False,
+                customers=False,
+                wiki=False,
+                pi=False,
+            )
 
     @mcp.tool()
     def update_workspace_features(

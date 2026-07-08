@@ -57,9 +57,19 @@ def register_module_tools(mcp: FastMCP) -> None:
                 project_id=project_id,
                 params=params.model_dump(exclude_none=True),
             )
-        return client.modules.list_lite(
-            workspace_slug=workspace_slug, project_id=project_id, params=params
-        )
+        try:
+            return client.modules.list_lite(
+                workspace_slug=workspace_slug, project_id=project_id, params=params
+            )
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            response = client.modules.list(
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                params=params.to_query_params(),
+            )
+            return PaginatedModuleLiteResponse.model_validate(response.model_dump())
 
     @mcp.tool()
     def create_module(
