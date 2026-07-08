@@ -2,6 +2,12 @@
 
 A Model Context Protocol (MCP) server for Plane integration. This server provides tools and resources for interacting with Plane through AI agents.
 
+## About this fork
+
+This repository is a fork of the official Plane MCP Server maintained by Plane. It keeps the upstream tool surface while adding compatibility fixes for self-hosted Plane instances, especially Plane `v1.3.1`, where several cloud/newer endpoints are unavailable or behave differently.
+
+Use this fork when your MCP client connects to a self-hosted Plane workspace and the official server returns 404/403 responses, ignores PQL filters, or produces oversized responses from fallback endpoints.
+
 ## Features
 
 * 🔧 **Plane Integration**: Interact with Plane APIs and services
@@ -21,21 +27,30 @@ The server supports three transport methods. **We recommend using `uvx`** as it 
 
 **MCP Client Configuration** (using uvx - recommended):
 
+For self-hosted Plane, pin this fork by tag:
+
 ```json
 {
   "mcpServers": {
     "plane": {
       "command": "uvx",
-      "args": ["plane-mcp-server", "stdio"],
+      "args": [
+        "--from",
+        "git+ssh://git@github.com/linnoedge/plane-mcp-server.git@v0.2.10-selfhost.3",
+        "plane-mcp-server",
+        "stdio"
+      ],
       "env": {
         "PLANE_API_KEY": "<your-api-key>",
         "PLANE_WORKSPACE_SLUG": "<your-workspace-slug>",
-        "PLANE_BASE_URL": "https://api.plane.so"
+        "PLANE_BASE_URL": "https://your-plane.example.com"
       }
     }
   }
 }
 ```
+
+For Plane Cloud or upstream releases, use the official package configuration from the upstream repository.
 
 ### 2. Remote HTTP Transport with OAuth
 
@@ -108,6 +123,19 @@ Connect to the hosted Plane MCP server using OAuth authentication via Server-Sen
 
 **Note**: OAuth authentication will be handled automatically when connecting to the remote server. This transport is deprecated in favor of the HTTP transport.
 
+
+## Self-hosted Plane compatibility
+
+This fork includes compatibility behavior for older/self-hosted Plane deployments:
+
+- Falls back when `*-lite` endpoints are not available for projects, modules, cycles, members, and related resources.
+- Uses the working self-hosted search endpoint with `search=` instead of SDK/cloud-only search behavior.
+- Locally evaluates common PQL filters for work items because Plane `v1.3.1` may ignore backend PQL filters.
+- Refuses unsupported PQL on Plane `v1.3.1` instead of passing it through and returning misleading unfiltered data.
+- Adds local project-scoped count fallback for work items.
+- Keeps workspace-wide work item counts conservative when the self-hosted backend cannot provide them safely.
+
+Supported local PQL fallback covers common simple filters joined by `AND`, including `=`, `IN (...)`, `NOT IN (...)`, `title/name ~`, `currentUser()`, `openStates()`, `closedStates()`, and `activeStates()`.
 
 ## Configuration
 
