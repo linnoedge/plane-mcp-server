@@ -3,6 +3,7 @@
 from typing import Any, get_args
 
 from fastmcp import FastMCP
+from plane.models.enums import WorkItemRelationTypeEnum
 from plane.models.work_item_relation_definitions import (
     CreateWorkItemRelationDefinition,
     PaginatedWorkItemRelationDefinitionResponse,
@@ -55,6 +56,7 @@ def register_work_item_relation_definition_tools(mcp: FastMCP) -> None:
                 break
         return {
             "built_in_dependencies": list(get_args(DependencyTypeEnum)),
+            "core_relations": list(get_args(WorkItemRelationTypeEnum)),
             "custom_definitions": [d.model_dump() for d in results],
         }
 

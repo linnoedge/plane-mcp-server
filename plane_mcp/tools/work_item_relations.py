@@ -17,10 +17,14 @@ built-in blocked_by.
 from typing import Any, get_args
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
+from plane.models.enums import WorkItemRelationTypeEnum
 from plane.models.work_items import (
     CreateWorkItemCustomRelation,
     CreateWorkItemDependency,
+    CreateWorkItemRelation,
     DependencyTypeEnum,
+    RemoveWorkItemRelation,
     WorkItemWithRelationType,
 )
 
@@ -28,6 +32,7 @@ from plane_mcp.client import get_plane_client_context
 
 # Built-in dependency relation_type values (sourced from the SDK contract).
 _DEPENDENCY_TYPES: tuple[str, ...] = get_args(DependencyTypeEnum)
+_CORE_RELATION_TYPES: tuple[str, ...] = get_args(WorkItemRelationTypeEnum)
 
 
 def register_work_item_relation_tools(mcp: FastMCP) -> None:
@@ -49,19 +54,49 @@ def register_work_item_relation_tools(mcp: FastMCP) -> None:
             custom: Custom relations grouped by definition label.
         """
         client, workspace_slug = get_plane_client_context()
-        dependencies = client.work_items.dependencies.list(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            work_item_id=work_item_id,
-        )
-        custom = client.work_items.custom_relations.list(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            work_item_id=work_item_id,
-        )
+        try:
+            core = client.work_items.relations.list(
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                work_item_id=work_item_id,
+            )
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            core = None
+        try:
+            dependencies = client.work_items.dependencies.list(
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                work_item_id=work_item_id,
+            )
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            dependencies = None
+        try:
+            custom = client.work_items.custom_relations.list(
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                work_item_id=work_item_id,
+            )
+        except HttpError as e:
+            if e.status_code != 404:
+                raise
+            custom = None
+        if core is None and dependencies is None and custom is None:
+            return {
+                "error": "work_item_relations_unavailable_on_plane_self_host",
+                "hint": "This Plane self-host server does not expose work item relation endpoints.",
+            }
         return {
-            "dependencies": dependencies.model_dump(),
-            "custom": {label: [item.model_dump() for item in items] for label, items in custom.items()},
+            "core": core.model_dump() if core is not None else None,
+            "dependencies": dependencies.model_dump() if dependencies is not None else None,
+            "custom": (
+                {label: [item.model_dump() for item in items] for label, items in custom.items()}
+                if custom is not None
+                else None
+            ),
         }
 
     @mcp.tool()
@@ -94,20 +129,35 @@ def register_work_item_relation_tools(mcp: FastMCP) -> None:
         """
         client, workspace_slug = get_plane_client_context()
         if relation_type:
-            if relation_type not in _DEPENDENCY_TYPES:
-                raise ValueError(
-                    f"relation_type must be one of {list(_DEPENDENCY_TYPES)}. For any "
-                    "other relationship, pass relation_definition_id + "
-                    "relation_definition_label from list_work_item_relation_definitions."
+            if relation_type in _DEPENDENCY_TYPES:
+                try:
+                    return client.work_items.dependencies.create(
+                        workspace_slug=workspace_slug,
+                        project_id=project_id,
+                        work_item_id=work_item_id,
+                        data=CreateWorkItemDependency(
+                            relation_type=relation_type,  # type: ignore[arg-type]
+                            work_item_ids=work_item_ids,
+                        ),
+                    )
+                except HttpError as e:
+                    if e.status_code != 404:
+                        raise
+            if relation_type in _CORE_RELATION_TYPES:
+                client.work_items.relations.create(
+                    workspace_slug=workspace_slug,
+                    project_id=project_id,
+                    work_item_id=work_item_id,
+                    data=CreateWorkItemRelation(
+                        relation_type=relation_type,  # type: ignore[arg-type]
+                        issues=work_item_ids,
+                    ),
                 )
-            return client.work_items.dependencies.create(
-                workspace_slug=workspace_slug,
-                project_id=project_id,
-                work_item_id=work_item_id,
-                data=CreateWorkItemDependency(
-                    relation_type=relation_type,  # type: ignore[arg-type]
-                    work_item_ids=work_item_ids,
-                ),
+                return []
+            raise ValueError(
+                f"relation_type must be one of {list(_CORE_RELATION_TYPES)}. For custom "
+                "relationships, pass relation_definition_id + relation_definition_label "
+                "from list_work_item_relation_definitions."
             )
         if relation_definition_id and relation_definition_label:
             return client.work_items.custom_relations.create(
@@ -131,24 +181,31 @@ def register_work_item_relation_tools(mcp: FastMCP) -> None:
         project_id: str,
         work_item_id: str,
         related_work_item_id: str,
-        is_dependency: bool,
+        is_dependency: bool | None = None,
     ) -> None:
         """Remove ONE relation between two work items.
 
-        A built-in dependency and a custom relation are removed independently —
-        removing one leaves the other intact. Set is_dependency from the relation
-        the user named (see list_work_item_relations): True for a built-in
-        dependency (blocking, blocked_by, start/finish ordering), False for a
-        custom relation.
+        A built-in dependency, core relation, and custom relation are removed independently.
+        Set is_dependency from the relation the user named (see list_work_item_relations):
+        True for a built-in dependency, False for a custom relation, or omit it for
+        core relations such as duplicate/relates_to.
 
         Args:
             project_id: UUID of the project.
             work_item_id: UUID of the source work item.
             related_work_item_id: UUID of the related work item.
             is_dependency: True to remove a built-in dependency, False to remove a
-                custom relation.
+                custom relation, or None to remove a core relation.
         """
         client, workspace_slug = get_plane_client_context()
+        if is_dependency is None:
+            client.work_items.relations.delete(
+                workspace_slug=workspace_slug,
+                project_id=project_id,
+                work_item_id=work_item_id,
+                data=RemoveWorkItemRelation(related_issue=related_work_item_id),
+            )
+            return
         remove = client.work_items.dependencies.remove if is_dependency else client.work_items.custom_relations.remove
         remove(
             workspace_slug=workspace_slug,

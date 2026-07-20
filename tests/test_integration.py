@@ -11,6 +11,7 @@ import asyncio
 import os
 import uuid
 
+import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
@@ -22,9 +23,7 @@ def get_config():
     mcp_url = os.getenv("PLANE_TEST_MCP_URL", "http://localhost:8211")
 
     if not api_key or not workspace_slug:
-        raise RuntimeError(
-            "Missing required env vars: PLANE_TEST_API_KEY, PLANE_TEST_WORKSPACE_SLUG"
-        )
+        raise RuntimeError("Missing required env vars: PLANE_TEST_API_KEY, PLANE_TEST_WORKSPACE_SLUG")
 
     return {
         "api_key": api_key,
@@ -44,7 +43,7 @@ def extract_result(result):
         if hasattr(content, "text"):
             try:
                 return json.loads(content.text)
-            except:
+            except Exception:
                 return {"raw": content.text}
     return {}
 
@@ -54,8 +53,8 @@ async def run_integration_test():
     Full integration test:
     1. Create a project
     2. Create work item 1
-    3. Create work item 2 
-    4. Update work item 2 with work item 1 as parent 
+    3. Create work item 2
+    4. Update work item 2 with work item 1 as parent
     5. Find or create an "Epic" work item type, and create an epic work item
     6. Update work item 2 to be under the epic
     7. List all epics (work items of the "Epic" type)
@@ -66,8 +65,8 @@ async def run_integration_test():
     12. Delete the epic
     13. Delete work items
     14. Delete project
-    """ 
-    config = get_config() 
+    """
+    config = get_config()
     unique_id = uuid.uuid4().hex[:6]
 
     transport = StreamableHttpTransport(
@@ -133,9 +132,7 @@ async def run_integration_test():
 
         # 5. Find or create an "Epic" work item type, and create an epic work item
         print("Finding or creating 'Epic' work item type...")
-        epic_type_result = await client.call_tool(
-            "resolve_work_item_type", {"project_id": project_id, "name": "Epic"}
-        )
+        epic_type_result = await client.call_tool("resolve_work_item_type", {"project_id": project_id, "name": "Epic"})
         epic_type = extract_result(epic_type_result)
 
         epic_type_id = epic_type["id"]
@@ -175,10 +172,9 @@ async def run_integration_test():
             "list_work_items",
             {
                 "project_id": project_id,
-                "pql": f'type = "{epic_type_id}"',
             },
         )
-        epics = extract_result(epics_result)["results"]
+        epics = [item for item in extract_result(epics_result)["results"] if item.get("type_id") == epic_type_id]
         print(f"Epics in project: {[e['id'] for e in epics]}")
 
         # 8. Create a milestone and associate it with the project and work items
@@ -188,7 +184,7 @@ async def run_integration_test():
             {
                 "project_id": project_id,
                 "name": f"Milestone {unique_id}",
-                "description": "Integration test milestone",   
+                "description": "Integration test milestone",
                 "associated_work_item_ids": [epic_id, work_item_1_id, work_item_2_id],
             },
         )
@@ -209,18 +205,18 @@ async def run_integration_test():
         print(f"Work items associated with milestone: {[wi['id'] for wi in milestone_work_items]}")
 
         print(f"Created milestone: {milestone_id}")
-        
+
         # 9. Update the milestone to change its name and description
         print("Updating milestone...")
         await client.call_tool(
-            "update_milestone", 
-            { 
-                "project_id": project_id, 
-                "milestone_id": milestone_id, 
-                "name": f"Updated Milestone {unique_id}", 
-                "description": "Updated description for integration test milestone" 
+            "update_milestone",
+            {
+                "project_id": project_id,
+                "milestone_id": milestone_id,
+                "name": f"Updated Milestone {unique_id}",
+                "description": "Updated description for integration test milestone",
             },
-        ) 
+        )
 
         print("Updated milestone")
 
@@ -256,6 +252,8 @@ async def run_integration_test():
 
 def test_full_integration():
     """Pytest entry point - runs the async integration test."""
+    if not os.getenv("PLANE_TEST_API_KEY") or not os.getenv("PLANE_TEST_WORKSPACE_SLUG"):
+        pytest.skip("Set PLANE_TEST_API_KEY and PLANE_TEST_WORKSPACE_SLUG to run live integration tests")
     asyncio.run(run_integration_test())
 
 
@@ -333,6 +331,25 @@ EXPECTED_TOOLS = [
     # Role tools
     "list_roles",
     "retrieve_role",
+    # Teamspace tools
+    "list_teamspaces",
+    "retrieve_teamspace",
+    "create_teamspace",
+    "update_teamspace",
+    "delete_teamspace",
+    "list_teamspace_projects",
+    "manage_teamspace_projects",
+    "list_teamspace_members",
+    "manage_teamspace_members",
+    # Workflow tools
+    "list_workflows",
+    "create_workflow",
+    "update_workflow",
+    "manage_workflow_states",
+    "list_workflow_transitions",
+    "create_workflow_transition",
+    "update_workflow_transition",
+    "delete_workflow_transition",
     # Cycle tools
     "list_cycles",
     "create_cycle",
@@ -413,6 +430,8 @@ async def run_tools_availability_test():
 
 def test_tools_availability():
     """Pytest entry point - verifies all expected tools are registered."""
+    if not os.getenv("PLANE_TEST_API_KEY") or not os.getenv("PLANE_TEST_WORKSPACE_SLUG"):
+        pytest.skip("Set PLANE_TEST_API_KEY and PLANE_TEST_WORKSPACE_SLUG to run live integration tests")
     asyncio.run(run_tools_availability_test())
 
 

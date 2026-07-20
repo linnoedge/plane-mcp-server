@@ -25,15 +25,12 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
         """
         List work item types. Omit project_id for workspace-level types.
 
-        Each result's `id` is the `work_item_type_id` needed by list_work_item_properties
-        to look up custom property and option UUIDs for PQL cf[] filters.
+        Each result's `id` is the `work_item_type_id` needed by list_work_item_properties.
         """
         client, workspace_slug = get_plane_client_context()
         try:
             if project_id:
-                return client.work_item_types.list(
-                    workspace_slug=workspace_slug, project_id=project_id, params=params
-                )
+                return client.work_item_types.list(workspace_slug=workspace_slug, project_id=project_id, params=params)
             return client.workspace_work_item_types.list(workspace_slug=workspace_slug)
         except HttpError as e:
             if e.status_code == 404:
@@ -80,9 +77,7 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
         )
 
         if project_id:
-            return client.work_item_types.create(
-                workspace_slug=workspace_slug, project_id=project_id, data=data
-            )
+            return client.work_item_types.create(workspace_slug=workspace_slug, project_id=project_id, data=data)
         return client.workspace_work_item_types.create(workspace_slug=workspace_slug, data=data)
 
     @mcp.tool()
@@ -177,9 +172,7 @@ def register_work_item_type_tools(mcp: FastMCP) -> None:
             return at_workspace
 
         # Mode B — types are per-project; enable the feature if needed, then find or create.
-        project_features = client.projects.get_features(
-            workspace_slug=workspace_slug, project_id=project_id
-        )
+        project_features = client.projects.get_features(workspace_slug=workspace_slug, project_id=project_id)
         if not project_features.model_dump().get("work_item_types"):
             client.projects.update_features(
                 workspace_slug=workspace_slug,

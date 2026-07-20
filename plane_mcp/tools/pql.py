@@ -15,9 +15,8 @@ def register_pql_tools(mcp: FastMCP) -> None:
         """
         Return the Plane Query Language (PQL) syntax reference.
 
-        Call this when composing the `pql` filter for `list_work_items`,
-        `list_archived_work_items`, `list_cycle_work_items`, `list_module_work_items`,
-        or `count_work_items`.
+        PQL is not reliable on Plane self-host v1.3.1 and the self-host-focused
+        tools refuse pql instead of passing through misleading filters.
 
         Args:
             detail: "full" (default) returns the comprehensive reference with

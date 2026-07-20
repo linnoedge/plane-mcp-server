@@ -1,9 +1,8 @@
 """Module-related tools for Plane MCP Server."""
 
-from typing import Annotated, Any, get_args
+from typing import Any, get_args
 
 from fastmcp import FastMCP
-from fastmcp.utilities.logging import get_logger
 from plane.errors.errors import HttpError
 from plane.models.enums import ModuleStatusEnum
 from plane.models.modules import (
@@ -15,12 +14,8 @@ from plane.models.modules import (
     UpdateModule,
 )
 from plane.models.query_params import LiteListQueryParams, WorkItemQueryParams
-from pydantic import Field
 
 from plane_mcp.client import get_plane_client_context
-from plane_mcp.tools.pql_reference import PQL_FIELD_HINT, PQL_FULL_REFERENCE
-
-logger = get_logger(__name__)
 
 
 def register_module_tools(mcp: FastMCP) -> None:
@@ -58,9 +53,7 @@ def register_module_tools(mcp: FastMCP) -> None:
                 params=params.model_dump(exclude_none=True),
             )
         try:
-            return client.modules.list_lite(
-                workspace_slug=workspace_slug, project_id=project_id, params=params
-            )
+            return client.modules.list_lite(workspace_slug=workspace_slug, project_id=project_id, params=params)
         except HttpError as e:
             if e.status_code != 404:
                 raise
@@ -251,7 +244,7 @@ def register_module_tools(mcp: FastMCP) -> None:
     def list_module_work_items(
         project_id: str,
         module_id: str,
-        pql: Annotated[str | None, Field(description=PQL_FIELD_HINT)] = None,
+        pql: str | None = None,
         order_by: str | None = None,
         per_page: int | None = None,
         cursor: str | None = None,
@@ -259,13 +252,12 @@ def register_module_tools(mcp: FastMCP) -> None:
         fields: str | None = None,
     ) -> dict[str, Any]:
         """
-        List work items in a module with optional PQL filtering.
+        List work items in a module.
 
         Args:
             project_id: UUID of the project
             module_id: UUID of the module
-            pql: PQL filter expression. See field description for syntax.
-                Omit to list all items in the module.
+            pql: Unsupported on Plane self-host. If provided, this tool returns an unsupported_pql error.
             order_by: Field to sort by; prefix with `-` for descending.
             per_page: Results per page, 1-100 (default 25).
             cursor: Pagination cursor from a previous response's `next_cursor`.
@@ -276,31 +268,28 @@ def register_module_tools(mcp: FastMCP) -> None:
             Paginated envelope with results, total_count, next_cursor, prev_cursor.
         """
         client, workspace_slug = get_plane_client_context()
+        if pql:
+            return {
+                "error": "unsupported_pql_on_plane_self_host",
+                "failed_pql": pql,
+                "hint": (
+                    "This Plane self-host server ignores or does not support PQL. "
+                    "Retry without pql and filter results client-side."
+                ),
+            }
         params = WorkItemQueryParams(
-            pql=pql,
             order_by=order_by,
             per_page=per_page,
             cursor=cursor,
             expand=expand,
             fields=fields,
         )
-        try:
-            response: PaginatedModuleWorkItemResponse = client.modules.list_work_items(
-                workspace_slug=workspace_slug,
-                project_id=project_id,
-                module_id=module_id,
-                params=params,
-            )
-        except HttpError as e:
-            if pql and e.status_code == 400 and isinstance(e.response, dict) and "pql" in e.response:
-                logger.warning("list_module_work_items: invalid PQL %r → %s", pql, e.response)
-                return {
-                    "error": e.response["pql"],
-                    "failed_pql": pql,
-                    "pql_reference": PQL_FULL_REFERENCE,
-                    "hint": "The PQL above failed. Fix it using the reference and retry list_module_work_items.",
-                }
-            raise
+        response: PaginatedModuleWorkItemResponse = client.modules.list_work_items(
+            workspace_slug=workspace_slug,
+            project_id=project_id,
+            module_id=module_id,
+            params=params,
+        )
         return {
             "results": [
                 item.model_dump() if hasattr(item, "model_dump") else item for item in (response.results or [])

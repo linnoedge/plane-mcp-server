@@ -65,7 +65,7 @@ def register_initiative_tools(mcp: FastMCP) -> None:
                 workspace_slug,
                 'Initiatives are stored as "Initiative" work items here. List them with '
                 'resolve_work_item_type(project_id, "Initiative"), then '
-                "list_work_items(project_id, pql='type = \"<type id>\"'). "
+                "list_work_items(project_id) and filter returned type_id client-side. "
                 "Work items belong to a project — ask which if not named.",
             )
         except ToolError:

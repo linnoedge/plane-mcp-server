@@ -42,25 +42,15 @@ def register_work_item_property_tools(mcp: FastMCP) -> None:
           - project_id + work_item_type_id       → properties linked to that type in that project,
                                                    falling back to project-flat then workspace if empty
 
-        For PQL filtering by name, prefer calling with NO args — one workspace-wide
-        fetch beats iterating every work item type. Each result includes the
-        `display_name` you can match in-memory before composing `cf["<id>"]` in PQL.
-
         Each result includes:
-        - id: property UUID — use as cf["<id>"] in PQL filters
+        - id: property UUID
         - display_name: user-facing label (e.g. "Fed", "Acceptance Criteria")
         - property_type: TEXT | OPTION | DECIMAL | BOOLEAN | DATETIME | RELATION | URL | EMAIL
-        - options: for OPTION type, each option has id + name; use option id in PQL
-
-        PQL workflow for filtering by custom property (efficient path):
-          1. list_work_item_properties()                  → all workspace properties, one call
-          2. find the property by display_name in-memory  → property.id
-          3. list_work_items(pql='cf["<property.id>"] = "<option.id>"')
+        - options: for OPTION type, each option has id + name
         """
         client, workspace_slug = get_plane_client_context()
 
         # Fast path — no args: return every workspace-level property in ONE call.
-        # Use this when resolving property UUIDs by display_name for PQL composition.
         if not work_item_type_id and not project_id:
             return client.workspace_work_item_properties.list(workspace_slug=workspace_slug)
 

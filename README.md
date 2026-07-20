@@ -130,12 +130,9 @@ This fork includes compatibility behavior for older/self-hosted Plane deployment
 
 - Falls back when `*-lite` endpoints are not available for projects, modules, cycles, members, and related resources.
 - Uses the working self-hosted search endpoint with `search=` instead of SDK/cloud-only search behavior.
-- Locally evaluates common PQL filters for work items because Plane `v1.3.1` may ignore backend PQL filters.
-- Refuses unsupported PQL on Plane `v1.3.1` instead of passing it through and returning misleading unfiltered data.
+- Refuses PQL on Plane self-host because Plane `v1.3.1` may ignore backend PQL filters and return misleading unfiltered data.
 - Adds local project-scoped count fallback for work items.
 - Keeps workspace-wide work item counts conservative when the self-hosted backend cannot provide them safely.
-
-Supported local PQL fallback covers common simple filters joined by `AND`, including `=`, `IN (...)`, `NOT IN (...)`, `title/name ~`, `currentUser()`, `openStates()`, `closedStates()`, and `activeStates()`.
 
 ## Configuration
 
