@@ -48,6 +48,88 @@ def _id_list(values: Any) -> list[str]:
     return ids
 
 
+def _value_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("id")
+    if hasattr(value, "id"):
+        return value.id
+    return None
+
+
+def _work_item_matches(
+    item: dict[str, Any],
+    priority: str | None,
+    state_group: str | None,
+    state_id: str | None,
+    assignee_id: str | None,
+    label_id: str | None,
+) -> bool:
+    if priority is not None and item.get("priority") != priority:
+        return False
+    state = item.get("state")
+    if state_id is not None and _value_id(state) != state_id:
+        return False
+    if state_group is not None:
+        if not isinstance(state, dict) or state.get("group") != state_group:
+            return False
+    if assignee_id is not None and assignee_id not in _id_list(item.get("assignees")):
+        return False
+    if label_id is not None and label_id not in _id_list(item.get("labels")):
+        return False
+    return True
+
+
+def _filter_items_from_pages(
+    fetch_page: Any,
+    priority: str | None,
+    state_group: str | None,
+    state_id: str | None,
+    assignee_id: str | None,
+    label_id: str | None,
+    limit: int,
+    max_pages: int,
+    start_cursor: str | None = None,
+) -> dict[str, Any]:
+    results = []
+    cursor = start_cursor
+    pages_scanned = 0
+    total_scanned = 0
+    total_available = None
+    next_cursor = ""
+    has_more = False
+
+    while pages_scanned < max_pages and len(results) < limit:
+        page = fetch_page(cursor)
+        pages_scanned += 1
+        items = page.get("results") or []
+        total_available = page.get("total_count", total_available)
+        total_scanned += len(items)
+        next_cursor = page.get("next_cursor") or ""
+        has_more = bool(page.get("next_page_results"))
+
+        for item in items:
+            if _work_item_matches(item, priority, state_group, state_id, assignee_id, label_id):
+                results.append(item)
+                if len(results) >= limit:
+                    break
+
+        if not has_more or not next_cursor:
+            break
+        cursor = next_cursor
+
+    return {
+        "results": results,
+        "count": len(results),
+        "total_scanned": total_scanned,
+        "pages_scanned": pages_scanned,
+        "total_available": total_available,
+        "next_cursor": next_cursor if has_more else "",
+        "has_more": has_more,
+    }
+
+
 def _work_item_list_payload(response: Any) -> dict[str, Any]:
     if isinstance(response, dict):
         if "results" in response:
@@ -199,7 +281,6 @@ def register_work_item_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def list_work_items(
         project_id: str | None = None,
-        pql: str | None = None,
         order_by: str | None = None,
         per_page: int | None = None,
         cursor: str | None = None,
@@ -209,48 +290,45 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         external_source: str | None = None,
     ) -> dict[str, Any]:
         """
-        List work items.
+        List/enumerate work items and page through results.
 
-        Omit project_id to list across the entire workspace.
-        Pass project_id to scope results to a single project.
+        Use this when you need a project-scoped list, exact external_id lookup,
+        details like description_html, or manual paging. On Plane self-host,
+        server-side structured filters are not reliable/exposed here; do not use
+        PQL or filters. For priority/state/assignee/label filtering, prefer
+        filter_work_items, which scans list pages and filters client-side.
 
-        For UUID fields (assignee, state, label, cycle, module, type,
-        milestone) call the relevant list tool first to get the UUID.
+        Prefer project_id whenever possible. Omit project_id only for workspace-wide
+        browsing, which can be large. Always keep per_page <= 100 and use fields to
+        avoid oversized responses.
 
         Args:
-            project_id: UUID of the project. Omit for workspace-wide results.
-            pql: Unsupported on Plane self-host. If provided, this tool returns an unsupported_pql error.
-            order_by: Sort field; prefix `-` for descending (e.g. `-created_at`).
-            per_page: 1-100, default 25.
-            cursor: From previous response's next_cursor.
-            expand: Comma-separated relations to expand (e.g. assignees,labels,state).
-            fields: Sparse fieldset — id, name, sequence_id, priority, state,
-                project, assignees, labels, type_id, description_html, start_date,
-                target_date, created_at, updated_at, created_by, is_draft. Use
-                `project` (not `project_id`) and `description_html` (there is no
-                `description` field). Any field you omit or misname comes back
-                null — a null here does NOT mean the item lacks that value; it
-                means it was not requested. To read the description, include
-                description_html; for the type, include type_id.
-            external_id / external_source: Filter by external system.
+            project_id: UUID of the project. Omit only for workspace-wide browsing.
+            order_by: Sort field; prefix `-` for descending. Common values:
+                created_at, -created_at, updated_at, -updated_at, sequence_id,
+                -sequence_id, priority, name.
+            per_page: Page size, 1-100. Use small pages for client-side filtering.
+            cursor: Pagination cursor from previous response.next_cursor.
+            expand: Comma-separated relations to expand. Common values:
+                assignees,state,labels,parent. Expanded relations may be objects;
+                without expand they are usually UUIDs.
+            fields: Sparse fieldset. Common safe fields: id,name,sequence_id,
+                priority,state,project,assignees,labels,type_id,description_html,
+                start_date,target_date,created_at,updated_at,parent,is_draft.
+                Use project, not project_id. Use description_html, not description.
+                Omitted/misnamed fields return null because they were not requested.
+            external_id: Exact external system id lookup/filter.
+            external_source: Exact external system source lookup/filter. Use with
+                external_id when possible.
 
         Returns:
-            results: Paginated list of work items.
-            total_count: True DB total, not page-bounded — use for counts.
-            next_cursor: Cursor for the next page.
-            prev_cursor: Cursor for the previous page.
+            results: Current page of work items.
+            total_count: Total matching count reported by Plane, not page-bounded.
+            count: Number of results in this page.
+            next_cursor / prev_cursor: Pagination cursors.
+            next_page_results / prev_page_results: Whether more pages exist.
         """
         client, workspace_slug = get_plane_client_context()
-
-        if pql:
-            return {
-                "error": "unsupported_pql_on_plane_self_host",
-                "failed_pql": pql,
-                "hint": (
-                    "This Plane self-host server ignores or does not support PQL. "
-                    "Retry without pql and filter results client-side."
-                ),
-            }
 
         params = WorkItemQueryParams(
             order_by=order_by,
@@ -263,27 +341,16 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         )
 
         try:
+            query_params = params.model_dump(exclude_none=True)
             if project_id:
-                if external_id or external_source:
-                    response = client.work_items._get(
-                        f"{workspace_slug}/projects/{project_id}/work-items/",
-                        params=params.model_dump(exclude_none=True),
-                    )
-                else:
-                    response = client.work_items.list(
-                        workspace_slug=workspace_slug,
-                        project_id=project_id,
-                        params=params,
-                    )
-            elif external_id or external_source:
                 response = client.work_items._get(
-                    f"{workspace_slug}/work-items",
-                    params=params.model_dump(exclude_none=True),
+                    f"{workspace_slug}/projects/{project_id}/work-items/",
+                    params=query_params,
                 )
             else:
-                response = client.work_items.list_workspace(
-                    workspace_slug=workspace_slug,
-                    params=params,
+                response = client.work_items._get(
+                    f"{workspace_slug}/work-items",
+                    params=query_params,
                 )
         except HttpError:
             raise
@@ -291,9 +358,95 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         return _work_item_list_payload(response)
 
     @mcp.tool()
+    def filter_work_items(
+        project_id: str,
+        priority: str | None = None,
+        state_id: str | None = None,
+        state_group: str | None = None,
+        assignee_id: str | None = None,
+        label_id: str | None = None,
+        limit: int = 25,
+        per_page: int = 100,
+        cursor: str | None = None,
+        max_pages: int = 10,
+        order_by: str | None = None,
+        fields: str | None = None,
+        expand: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Filter work items client-side across paginated list_work_items pages.
+
+        Use this on Plane self-host when you need practical filtering by priority,
+        state, assignee, or label. The self-host list endpoint does not apply those
+        filters server-side, so this tool scans pages using cursor pagination and
+        stops when it has limit matches, reaches max_pages, or reaches the end.
+
+        Args:
+            project_id: UUID of the project to scan. Required to avoid workspace-wide scans.
+            priority: Exact priority: urgent, high, medium, low, none.
+            state_id: Exact state UUID.
+            state_group: State group: backlog, unstarted, started, completed, cancelled.
+            assignee_id: User UUID that must be assigned to the item.
+            label_id: Label UUID that must be attached to the item.
+            limit: Maximum matching results to return.
+            per_page: Items fetched per scanned page, 1-100. Larger is faster but heavier.
+            cursor: Optional starting cursor to continue a previous scan.
+            max_pages: Maximum number of pages to scan in this call.
+            order_by: Sort before scanning, e.g. created_at, -created_at, priority.
+            fields: Sparse fields to return. Defaults to fields needed for filtering.
+            expand: Relations to expand. Defaults to assignees,state,labels,parent.
+
+        Returns:
+            results: Matching work items.
+            total_scanned: Number of work items inspected.
+            pages_scanned: Number of pages scanned.
+            next_cursor: Cursor to pass back for continuing the scan when has_more is true.
+            has_more: True if the underlying list still had more pages.
+        """
+        client, workspace_slug = get_plane_client_context()
+        safe_limit = max(1, min(limit, 100))
+        safe_per_page = max(1, min(per_page, 100))
+        safe_max_pages = max(1, min(max_pages, 100))
+        list_fields = fields or (
+            "id,name,sequence_id,priority,state,project,assignees,labels,type_id,"
+            "description_html,start_date,target_date,created_at,updated_at,parent,is_draft"
+        )
+        list_expand = expand or "assignees,state,labels,parent"
+
+        def fetch_page(page_cursor: str | None) -> dict[str, Any]:
+            params = WorkItemQueryParams(
+                order_by=order_by,
+                per_page=safe_per_page,
+                cursor=page_cursor,
+                expand=list_expand,
+                fields=list_fields,
+            )
+            response = client.work_items._get(
+                f"{workspace_slug}/projects/{project_id}/work-items/",
+                params=params.model_dump(exclude_none=True),
+            )
+            return _work_item_list_payload(response)
+
+        result = _filter_items_from_pages(
+            fetch_page=fetch_page,
+            priority=priority,
+            state_group=state_group,
+            state_id=state_id,
+            assignee_id=assignee_id,
+            label_id=label_id,
+            limit=safe_limit,
+            max_pages=safe_max_pages,
+            start_cursor=cursor,
+        )
+        result["filter_note"] = (
+            "Filters were applied client-side after scanning Plane self-host list pages. "
+            "Use next_cursor to continue scanning if has_more is true."
+        )
+        return result
+
+    @mcp.tool()
     def count_work_items(
         project_id: str | None = None,
-        pql: str | None = None,
         group_by: str | None = None,
         sub_group_by: str | None = None,
     ) -> dict[str, Any]:
@@ -304,7 +457,6 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         without fetching full work item payloads.
 
         Args:
-            pql: Unsupported on Plane self-host. If provided, this tool returns an unsupported_pql error.
             group_by: Dimension to group counts by. Supported values:
                 state_id, state__group, priority, project_id, type_id,
                 labels__id, assignees__id, issue_module__module_id,
@@ -322,15 +474,6 @@ def register_work_item_tools(mcp: FastMCP) -> None:
                 ISO dates for target_date/start_date, "None" for unset values.
         """
         client, workspace_slug = get_plane_client_context()
-        if pql:
-            return {
-                "error": "unsupported_pql_on_plane_self_host",
-                "failed_pql": pql,
-                "hint": (
-                    "This Plane self-host server ignores or does not support PQL. "
-                    "Retry without pql and filter results client-side."
-                ),
-            }
         if project_id is None:
             return {
                 "error": "workspace_count_unavailable_on_plane_self_host",
@@ -694,22 +837,32 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         order_by: str | None = None,
     ) -> WorkItemSearch:
         """
-        Search work items by text across a workspace.
+        Search work items by text across the workspace.
 
-        Matches on work item name, sequence id, and project identifier (not
-        description). For structured filtering, list work items without pql and
-        filter client-side because Plane self-host does not support PQL reliably.
+        Use this for quick text lookup when you know part of the work item name,
+        sequence id (for example BAM-11 or 11), or project identifier. This is not
+        a structured filter tool: it does not search description_html and should
+        not be used for assignee/state/label filtering. For those, use
+        list_work_items with project_id, sparse fields, small per_page, and
+        client-side filtering across pages.
 
         Args:
-            query: Free-text string matched against name, sequence id, and project identifier
-            expand: Comma-separated list of related fields to expand in response
-            fields: Comma-separated list of fields to include in response
-            external_id: External system identifier for filtering
-            external_source: External system source name for filtering
-            order_by: Field to order results by. Prefix with '-' for descending
+            query: Free-text query matched by Plane against work item name,
+                sequence id, and project identifier.
+            expand: Optional comma-separated relations to expand if the search
+                endpoint returns them, e.g. assignees,state,labels,parent.
+            fields: Optional sparse fieldset. Common fields: id,name,sequence_id,
+                priority,state,project,assignees,labels,type_id,description_html,
+                created_at,updated_at,parent,is_draft.
+            external_id: Exact external system id constraint when supported by the
+                search endpoint.
+            external_source: Exact external source constraint when supported by the
+                search endpoint.
+            order_by: Sort field; prefix '-' for descending when supported.
 
         Returns:
-            WorkItemSearch object containing search results
+            Search result object from Plane. Shape may differ from list_work_items;
+            use list_work_items when you need paginated, field-controlled pages.
         """
         client, workspace_slug = get_plane_client_context()
 

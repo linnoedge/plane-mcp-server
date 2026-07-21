@@ -183,6 +183,7 @@ EXPECTED_TOOLS = [
     "create_work_item_relation",
     "delete_project",
     "delete_work_item",
+    "filter_work_items",
     "get_features",
     "get_me",
     "get_project_members",
