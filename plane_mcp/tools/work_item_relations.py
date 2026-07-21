@@ -20,16 +20,13 @@ def register_work_item_relation_tools(mcp: FastMCP) -> None:
         """List relations for a work item."""
         client, workspace_slug = get_plane_client_context()
         try:
-            response = client.work_items.relations.list(
-                workspace_slug=workspace_slug,
-                project_id=project_id,
-                work_item_id=work_item_id,
+            return client.work_items.relations._get(
+                f"{workspace_slug}/projects/{project_id}/work-items/{work_item_id}/relations"
             )
         except HttpError as e:
             if e.status_code == 404:
                 return {}
             raise
-        return response.model_dump()
 
     @mcp.tool()
     def create_work_item_relation(
