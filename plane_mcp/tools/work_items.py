@@ -9,7 +9,6 @@ from plane.models.enums import PriorityEnum
 from plane.models.query_params import RetrieveQueryParams, WorkItemQueryParams
 from plane.models.work_items import (
     CreateWorkItem,
-    PaginatedWorkItemResponse,
     UpdateWorkItem,
     WorkItem,
     WorkItemSearch,
@@ -47,6 +46,51 @@ def _id_list(values: Any) -> list[str]:
         elif hasattr(value, "id") and value.id:
             ids.append(value.id)
     return ids
+
+
+def _work_item_list_payload(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        if "results" in response:
+            results = response.get("results") or []
+            total_count = response.get("total_count", len(results))
+            count = response.get("count", len(results))
+            return {
+                "results": results,
+                "total_count": total_count,
+                "count": count,
+                "next_cursor": response.get("next_cursor", ""),
+                "prev_cursor": response.get("prev_cursor", ""),
+                "next_page_results": response.get("next_page_results", False),
+                "prev_page_results": response.get("prev_page_results", False),
+                "shape_note": (
+                    "assignees, labels, state, project, parent, type_id are UUIDs unless expanded by the Plane API."
+                ),
+            }
+        return {
+            "results": [response],
+            "total_count": 1,
+            "count": 1,
+            "next_cursor": "",
+            "prev_cursor": "",
+            "next_page_results": False,
+            "prev_page_results": False,
+            "shape_note": (
+                "assignees, labels, state, project, parent, type_id are UUIDs unless expanded by the Plane API."
+            ),
+        }
+    results = [item.model_dump() if hasattr(item, "model_dump") else item for item in (response.results or [])]
+    return {
+        "results": results,
+        "total_count": response.total_count,
+        "count": response.count,
+        "next_cursor": response.next_cursor,
+        "prev_cursor": response.prev_cursor,
+        "next_page_results": response.next_page_results,
+        "prev_page_results": response.prev_page_results,
+        "shape_note": (
+            "assignees, labels, state, project, parent, type_id are UUIDs unless expanded by the Plane API."
+        ),
+    }
 
 
 def _work_item_detail_payload(
@@ -220,10 +264,21 @@ def register_work_item_tools(mcp: FastMCP) -> None:
 
         try:
             if project_id:
-                response: PaginatedWorkItemResponse = client.work_items.list(
-                    workspace_slug=workspace_slug,
-                    project_id=project_id,
-                    params=params,
+                if external_id or external_source:
+                    response = client.work_items._get(
+                        f"{workspace_slug}/projects/{project_id}/work-items/",
+                        params=params.model_dump(exclude_none=True),
+                    )
+                else:
+                    response = client.work_items.list(
+                        workspace_slug=workspace_slug,
+                        project_id=project_id,
+                        params=params,
+                    )
+            elif external_id or external_source:
+                response = client.work_items._get(
+                    f"{workspace_slug}/work-items",
+                    params=params.model_dump(exclude_none=True),
                 )
             else:
                 response = client.work_items.list_workspace(
@@ -233,20 +288,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         except HttpError:
             raise
 
-        return {
-            "results": [
-                item.model_dump() if hasattr(item, "model_dump") else item for item in (response.results or [])
-            ],
-            "total_count": response.total_count,
-            "count": response.count,
-            "next_cursor": response.next_cursor,
-            "prev_cursor": response.prev_cursor,
-            "next_page_results": response.next_page_results,
-            "prev_page_results": response.prev_page_results,
-            "shape_note": (
-                "assignees, labels, state, project, parent, type_id are UUIDs unless expanded by the Plane API."
-            ),
-        }
+        return _work_item_list_payload(response)
 
     @mcp.tool()
     def count_work_items(

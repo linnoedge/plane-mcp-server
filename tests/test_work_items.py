@@ -1,6 +1,6 @@
 """Tests for self-host compatibility helpers."""
 
-from plane_mcp.tools.work_items import _count_items, _id_list
+from plane_mcp.tools.work_items import _count_items, _id_list, _work_item_list_payload
 
 
 def test_id_list_accepts_uuid_strings_and_objects():
@@ -28,3 +28,14 @@ def test_count_items_groups_scalar_and_multi_value_fields():
     assert result["grouped_counts"]["label-1"]["sub_grouped_counts"]["urgent"] == {"count": 1}
     assert result["grouped_counts"]["label-1"]["sub_grouped_counts"]["none"] == {"count": 1}
     assert result["grouped_counts"]["None"]["count"] == 1
+
+
+def test_work_item_list_payload_wraps_single_external_filter_match():
+    item = {"id": "issue-1", "name": "External match"}
+
+    result = _work_item_list_payload(item)
+
+    assert result["results"] == [item]
+    assert result["total_count"] == 1
+    assert result["count"] == 1
+    assert result["next_page_results"] is False
