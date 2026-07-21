@@ -5,21 +5,11 @@ from typing import get_args
 from fastmcp import FastMCP
 from plane.errors.errors import HttpError
 from plane.models.enums import TimezoneEnum
-from plane.models.estimates import (
-    CreateEstimate,
-    CreateEstimatePoint,
-    Estimate,
-    EstimatePoint,
-    UpdateEstimate,
-    UpdateEstimatePoint,
-)
 from plane.models.projects import (
     CreateProject,
     PaginatedProjectLiteResponse,
     PaginatedProjectMemberResponse,
     Project,
-    ProjectFeature,
-    ProjectWorklogSummary,
     UpdateProject,
 )
 from plane.models.query_params import MemberListQueryParams, ProjectLiteListQueryParams
@@ -29,7 +19,7 @@ from plane_mcp.tools._compat import paginated_payload
 
 
 def register_project_tools(mcp: FastMCP) -> None:
-    """Register all project-related tools with the MCP server."""
+    """Register project-related tools with the MCP server."""
 
     @mcp.tool()
     def list_projects(
@@ -37,32 +27,9 @@ def register_project_tools(mcp: FastMCP) -> None:
         per_page: int | None = None,
         order_by: str | None = None,
     ) -> PaginatedProjectLiteResponse:
-        """
-        List projects in a workspace (paginated).
-
-        Use this primarily to resolve a project ID from its identifier/name. Prefer small pages
-        (per_page 5-20) and inspect only id, identifier, name, description, and archived_at from
-        each result. Call retrieve_project only when full project configuration is needed.
-
-        On Plane self-host v1.3.1, the lite endpoint is missing and this tool falls back to the
-        full project list endpoint, which can return many fields per project. Avoid per_page=1000
-        unless the user explicitly asks for the full project inventory.
-
-        Args:
-            cursor: Prior response's next_cursor; omit for first page.
-            per_page: Results per page (1-1000). Prefer 5-20 to reduce context usage.
-            order_by: Sort field; prefix '-' for descending.
-
-        Returns:
-            Paginated envelope: results + total_count, next_cursor,
-            next_page_results (page again while next_page_results is true).
-        """
+        """List projects in a workspace (paginated)."""
         client, workspace_slug = get_plane_client_context()
-
-        params = ProjectLiteListQueryParams(
-            cursor=cursor, per_page=per_page, order_by=order_by, include_archived=False
-        )
-
+        params = ProjectLiteListQueryParams(cursor=cursor, per_page=per_page, order_by=order_by, include_archived=False)
         try:
             return client.projects.list_lite(workspace_slug=workspace_slug, params=params)
         except HttpError as e:
@@ -93,41 +60,8 @@ def register_project_tools(mcp: FastMCP) -> None:
         external_id: str | None = None,
         is_issue_type_enabled: bool | None = None,
     ) -> Project:
-        """
-        Create a new project.
-
-        Args:
-            workspace_slug: The workspace slug identifier
-            name: Project name
-            identifier: Project identifier (e.g., "MP" for "My Project")
-            description: Project description
-            project_lead: UUID of the project lead user
-            default_assignee: UUID of the default assignee user
-            emoji: Emoji for the project
-            cover_image: Cover image URL or asset ID
-            module_view: Enable module view
-            cycle_view: Enable cycle view
-            issue_views_view: Enable issue views view
-            page_view: Enable page view
-            intake_view: Enable intake view
-            guest_view_all_features: Allow guests to view all features
-            archive_in: Days until auto-archive
-            close_in: Days until auto-close
-            timezone: Project timezone
-            external_source: External system source name
-            external_id: External system identifier
-            is_issue_type_enabled: Enable issue types
-
-        Returns:
-            Created Project object
-        """
+        """Create a new project."""
         client, workspace_slug = get_plane_client_context()
-
-        # Validate timezone against allowed literal values
-        validated_timezone: TimezoneEnum | None = (
-            timezone if timezone in get_args(TimezoneEnum) else None  # type: ignore[assignment]
-        )
-
         data = CreateProject(
             name=name,
             identifier=identifier,
@@ -144,26 +78,16 @@ def register_project_tools(mcp: FastMCP) -> None:
             guest_view_all_features=guest_view_all_features,
             archive_in=archive_in,
             close_in=close_in,
-            timezone=validated_timezone,
+            timezone=timezone if timezone in get_args(TimezoneEnum) else None,  # type: ignore[assignment]
             external_source=external_source,
             external_id=external_id,
             is_issue_type_enabled=is_issue_type_enabled,
         )
-
         return client.projects.create(workspace_slug=workspace_slug, data=data)
 
     @mcp.tool()
     def retrieve_project(project_id: str) -> Project:
-        """
-        Retrieve a project by ID.
-
-        Args:
-            workspace_slug: The workspace slug identifier
-            project_id: UUID of the project
-
-        Returns:
-            Project object
-        """
+        """Retrieve a project by ID."""
         client, workspace_slug = get_plane_client_context()
         return client.projects.retrieve(workspace_slug=workspace_slug, project_id=project_id)
 
@@ -194,49 +118,8 @@ def register_project_tools(mcp: FastMCP) -> None:
         default_state: str | None = None,
         estimate: str | None = None,
     ) -> Project:
-        """
-        Update a project by ID.
-
-        Args:
-            workspace_slug: The workspace slug identifier
-            project_id: UUID of the project
-            name: Project name
-            description: Project description
-            project_lead: UUID of the project lead user
-            default_assignee: UUID of the default assignee user
-            identifier: Project identifier
-            emoji: Emoji for the project
-            cover_image: Cover image URL or asset ID
-            network: Project visibility (0=secret, 2=public)
-            module_view: Enable module view
-            cycle_view: Enable cycle view
-            issue_views_view: Enable issue views view
-            page_view: Enable page view
-            intake_view: Enable intake view
-            guest_view_all_features: Allow guests to view all features
-            archive_in: Days until auto-archive
-            close_in: Days until auto-close
-            timezone: Project timezone
-            external_source: External system source name
-            external_id: External system identifier
-            is_issue_type_enabled: Enable issue types
-            is_time_tracking_enabled: Enable time tracking
-            default_state: UUID of the default state
-            estimate: Estimate configuration
-
-        Returns:
-            Updated Project object
-        """
-        if network is not None and network not in {0, 2}:
-            raise ValueError("network must be 0 (secret) or 2 (public)")
-
+        """Update a project by ID."""
         client, workspace_slug = get_plane_client_context()
-
-        # Validate timezone against allowed literal values
-        validated_timezone: TimezoneEnum | None = (
-            timezone if timezone in get_args(TimezoneEnum) else None  # type: ignore[assignment]
-        )
-
         data = UpdateProject(
             name=name,
             description=description,
@@ -254,7 +137,7 @@ def register_project_tools(mcp: FastMCP) -> None:
             guest_view_all_features=guest_view_all_features,
             archive_in=archive_in,
             close_in=close_in,
-            timezone=validated_timezone,
+            timezone=timezone if timezone in get_args(TimezoneEnum) else None,  # type: ignore[assignment]
             external_source=external_source,
             external_id=external_id,
             is_issue_type_enabled=is_issue_type_enabled,
@@ -262,53 +145,22 @@ def register_project_tools(mcp: FastMCP) -> None:
             default_state=default_state,
             estimate=estimate,
         )
-
         return client.projects.update(workspace_slug=workspace_slug, project_id=project_id, data=data)
 
     @mcp.tool()
     def delete_project(project_id: str) -> None:
-        """
-        Delete a project by ID.
-
-        Args:
-            workspace_slug: The workspace slug identifier
-            project_id: UUID of the project
-        """
+        """Delete a project by ID."""
         client, workspace_slug = get_plane_client_context()
         client.projects.delete(workspace_slug=workspace_slug, project_id=project_id)
 
     @mcp.tool()
     def manage_project_archive(project_id: str, archive: bool) -> None:
-        """
-        Archive or unarchive a project.
-
-        Archived projects are hidden from active project lists but not deleted.
-        All work items, cycles, and modules are preserved.
-
-        Args:
-            project_id: UUID of the project
-            archive: True to archive the project, False to unarchive it
-        """
+        """Archive or unarchive a project."""
         client, workspace_slug = get_plane_client_context()
         if archive:
             client.projects.archive(workspace_slug=workspace_slug, project_id=project_id)
         else:
             client.projects.unarchive(workspace_slug=workspace_slug, project_id=project_id)
-
-    @mcp.tool()
-    def get_project_worklog_summary(project_id: str) -> list[ProjectWorklogSummary]:
-        """
-        Get work log summary for a project.
-
-        Args:
-            workspace_slug: The workspace slug identifier
-            project_id: UUID of the project
-
-        Returns:
-            List of ProjectWorklogSummary objects containing work item IDs and durations
-        """
-        client, workspace_slug = get_plane_client_context()
-        return client.projects.get_worklog_summary(workspace_slug=workspace_slug, project_id=project_id)
 
     @mcp.tool()
     def get_project_members(
@@ -324,22 +176,7 @@ def register_project_tools(mcp: FastMCP) -> None:
         per_page: int | None = 100,
         order_by: str | None = None,
     ) -> PaginatedProjectMemberResponse:
-        """
-        List members of a project (filterable, paginated).
-
-        Optional filters first_name/last_name/email/display_name (case-insensitive
-        contains), role_slug (exact), is_active, is_bot — combined with AND.
-
-        Args:
-            project_id: UUID of the project.
-            cursor: Prior response's next_cursor; omit for first page.
-            per_page: Results per page (1-1000, default 100).
-            order_by: Sort field; prefix '-' for descending.
-
-        Returns:
-            Paginated envelope: results (members incl. role, role_slug,
-            is_active, is_bot) + total_count, next_cursor, next_page_results.
-        """
+        """List members of a project."""
         client, workspace_slug = get_plane_client_context()
         params = MemberListQueryParams(
             first_name=first_name,
@@ -354,296 +191,9 @@ def register_project_tools(mcp: FastMCP) -> None:
             order_by=order_by,
         )
         try:
-            return client.projects.get_members_lite(
-                workspace_slug=workspace_slug, project_id=project_id, params=params
-            )
+            return client.projects.get_members_lite(workspace_slug=workspace_slug, project_id=project_id, params=params)
         except HttpError as e:
             if e.status_code != 404:
                 raise
             members = client.projects.get_members(workspace_slug=workspace_slug, project_id=project_id)
             return PaginatedProjectMemberResponse.model_validate(paginated_payload(members))
-
-    @mcp.tool()
-    def update_project_features(
-        project_id: str,
-        modules: bool | None = None,
-        cycles: bool | None = None,
-        views: bool | None = None,
-        pages: bool | None = None,
-        intakes: bool | None = None,
-        work_item_types: bool | None = None,
-    ) -> ProjectFeature:
-        """
-        Update features of a project.
-
-        Args:
-            workspace_slug: The workspace slug identifier
-            project_id: UUID of the project
-            modules: Enable/disable modules feature
-            cycles: Enable/disable cycles feature
-            views: Enable/disable views feature
-            pages: Enable/disable pages feature
-            intakes: Enable/disable intakes feature
-            work_item_types: Enable/disable work item types feature
-
-        Returns:
-            Updated ProjectFeature object
-        """
-        client, workspace_slug = get_plane_client_context()
-
-        data = ProjectFeature(
-            modules=modules,
-            cycles=cycles,
-            views=views,
-            pages=pages,
-            intakes=intakes,
-            work_item_types=work_item_types,
-        )
-
-        return client.projects.update_features(workspace_slug=workspace_slug, project_id=project_id, data=data)
-
-    @mcp.tool()
-    def get_project_estimate(project_id: str) -> Estimate:
-        """
-        Get the estimate configuration for a project.
-
-        Returns the active estimate system including its ID, which is required
-        to call list_project_estimate_points.
-
-        Args:
-            project_id: UUID of the project
-
-        Returns:
-            Estimate object with id, name, and type fields
-        """
-        client, workspace_slug = get_plane_client_context()
-        return client.estimates.retrieve(workspace_slug=workspace_slug, project_id=project_id)
-
-    @mcp.tool()
-    def list_project_estimate_points(project_id: str, estimate_id: str) -> list[EstimatePoint]:
-        """
-        List all valid estimate points for a project.
-
-        Use this to discover the available estimate point UUIDs before calling
-        update_work_item with an estimate_point value. Each EstimatePoint has
-        an id (UUID to pass to update_work_item) and a value (display label
-        such as "1", "2", "3", "5", "8" or "XS", "S", "M", "L", "XL").
-
-        Workflow:
-            1. Call get_project_estimate to get the estimate_id
-            2. Call list_project_estimate_points with that estimate_id
-            3. Pick the EstimatePoint whose value matches the user's intent
-            4. Pass that EstimatePoint.id to update_work_item(estimate_point=...)
-
-        Args:
-            project_id: UUID of the project
-            estimate_id: UUID of the estimate (from get_project_estimate)
-
-        Returns:
-            List of EstimatePoint objects, each with id and value fields
-        """
-        client, workspace_slug = get_plane_client_context()
-        return client.estimates.list_points(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            estimate_id=estimate_id,
-        )
-
-    @mcp.tool()
-    def create_project_estimate(
-        project_id: str,
-        name: str,
-        type: str | None = None,
-        description: str | None = None,
-        last_used: bool = True,
-        external_id: str | None = None,
-        external_source: str | None = None,
-    ) -> Estimate:
-        """
-        Create a new estimate for a project.
-
-        Args:
-            project_id: UUID of the project
-            name: Name of the estimate (e.g., "Story Points", "T-Shirt Sizes")
-            type: Estimate type — "categories", "points", or "time"
-            description: Optional description
-            last_used: Whether this becomes the active estimate (default True)
-            external_id: External system identifier
-            external_source: External system source name
-
-        Returns:
-            Created Estimate object
-        """
-        client, workspace_slug = get_plane_client_context()
-        data = CreateEstimate(
-            name=name,
-            type=type,
-            description=description,
-            last_used=last_used,
-            external_id=external_id,
-            external_source=external_source,
-        )
-        return client.estimates.create(workspace_slug=workspace_slug, project_id=project_id, data=data)
-
-    @mcp.tool()
-    def update_project_estimate(
-        project_id: str,
-        name: str | None = None,
-        description: str | None = None,
-        external_id: str | None = None,
-        external_source: str | None = None,
-    ) -> Estimate:
-        """
-        Update the estimate for a project.
-
-        Args:
-            project_id: UUID of the project
-            name: New name for the estimate
-            description: New description
-            external_id: External system identifier
-            external_source: External system source name
-
-        Returns:
-            Updated Estimate object
-        """
-        client, workspace_slug = get_plane_client_context()
-        data = UpdateEstimate(
-            name=name,
-            description=description,
-            external_id=external_id,
-            external_source=external_source,
-        )
-        return client.estimates.update(workspace_slug=workspace_slug, project_id=project_id, data=data)
-
-    @mcp.tool()
-    def delete_project_estimate(project_id: str) -> None:
-        """
-        Delete the estimate for a project.
-
-        Args:
-            project_id: UUID of the project
-        """
-        client, workspace_slug = get_plane_client_context()
-        client.estimates.delete(workspace_slug=workspace_slug, project_id=project_id)
-
-    @mcp.tool()
-    def link_estimate_to_project(project_id: str, estimate_id: str) -> Project:
-        """
-        Link an estimate to a project, making it the active estimate system.
-
-        Args:
-            project_id: UUID of the project
-            estimate_id: UUID of the estimate to activate
-
-        Returns:
-            Updated Project object
-        """
-        client, workspace_slug = get_plane_client_context()
-        return client.estimates.link_to_project(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            estimate_id=estimate_id,
-        )
-
-    @mcp.tool()
-    def create_project_estimate_points(
-        project_id: str,
-        estimate_id: str,
-        points: list[dict],
-    ) -> list[EstimatePoint]:
-        """
-        Create estimate points for a project estimate.
-
-        Each point dict may have: value (required, max 20 chars), key (int),
-        description, external_id, external_source.
-
-        Example:
-            points=[
-                {"value": "1", "key": 0},
-                {"value": "2", "key": 1},
-                {"value": "3", "key": 2},
-                {"value": "5", "key": 3},
-                {"value": "8", "key": 4},
-            ]
-
-        Args:
-            project_id: UUID of the project
-            estimate_id: UUID of the estimate
-            points: List of point definitions
-
-        Returns:
-            List of created EstimatePoint objects
-        """
-        client, workspace_slug = get_plane_client_context()
-        data = [CreateEstimatePoint(**p) for p in points]
-        return client.estimates.create_points(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            estimate_id=estimate_id,
-            data=data,
-        )
-
-    @mcp.tool()
-    def update_project_estimate_point(
-        project_id: str,
-        estimate_id: str,
-        estimate_point_id: str,
-        value: str | None = None,
-        key: int | None = None,
-        description: str | None = None,
-        external_id: str | None = None,
-        external_source: str | None = None,
-    ) -> EstimatePoint:
-        """
-        Update a single estimate point.
-
-        Args:
-            project_id: UUID of the project
-            estimate_id: UUID of the estimate
-            estimate_point_id: UUID of the estimate point to update
-            value: New display value (max 20 chars, e.g. "XL", "13")
-            key: New sort key (integer)
-            description: New description
-            external_id: External system identifier
-            external_source: External system source name
-
-        Returns:
-            Updated EstimatePoint object
-        """
-        client, workspace_slug = get_plane_client_context()
-        data = UpdateEstimatePoint(
-            value=value,
-            key=key,
-            description=description,
-            external_id=external_id,
-            external_source=external_source,
-        )
-        return client.estimates.update_point(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            estimate_id=estimate_id,
-            estimate_point_id=estimate_point_id,
-            data=data,
-        )
-
-    @mcp.tool()
-    def delete_project_estimate_point(
-        project_id: str,
-        estimate_id: str,
-        estimate_point_id: str,
-    ) -> None:
-        """
-        Delete a single estimate point.
-
-        Args:
-            project_id: UUID of the project
-            estimate_id: UUID of the estimate
-            estimate_point_id: UUID of the estimate point to delete
-        """
-        client, workspace_slug = get_plane_client_context()
-        client.estimates.delete_point(
-            workspace_slug=workspace_slug,
-            project_id=project_id,
-            estimate_id=estimate_id,
-            estimate_point_id=estimate_point_id,
-        )

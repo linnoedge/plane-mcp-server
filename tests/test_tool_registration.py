@@ -19,5 +19,4 @@ def test_expected_tools_registered(monkeypatch):
     monkeypatch.setenv("PLANE_WORKSPACE_SLUG", "test-workspace")
 
     tool_names = asyncio.run(_list_tool_names())
-    missing = sorted(set(EXPECTED_TOOLS) - tool_names)
-    assert missing == []
+    assert tool_names == set(EXPECTED_TOOLS)

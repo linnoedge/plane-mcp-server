@@ -11,7 +11,7 @@ from plane_mcp.tools._compat import paginated_payload
 
 
 def register_workspace_tools(mcp: FastMCP) -> None:
-    """Register all workspace-related tools with the MCP server."""
+    """Register workspace tools with the MCP server."""
 
     @mcp.tool()
     def get_workspace_members(
@@ -26,21 +26,7 @@ def register_workspace_tools(mcp: FastMCP) -> None:
         per_page: int | None = 100,
         order_by: str | None = None,
     ) -> PaginatedWorkspaceMemberResponse:
-        """
-        List members of the current workspace (filterable, paginated).
-
-        Optional filters first_name/last_name/email/display_name (case-insensitive
-        contains), role_slug (exact), is_active, is_bot — combined with AND.
-
-        Args:
-            cursor: Prior response's next_cursor; omit for first page.
-            per_page: Results per page (1-1000, default 100).
-            order_by: Sort field; prefix '-' for descending.
-
-        Returns:
-            Paginated envelope: results (members incl. role, role_slug,
-            is_active, is_bot) + total_count, next_cursor, next_page_results.
-        """
+        """List members of the current workspace."""
         client, workspace_slug = get_plane_client_context()
         params = MemberListQueryParams(
             first_name=first_name,
@@ -64,18 +50,7 @@ def register_workspace_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     def get_features(project_id: str | None = None) -> WorkspaceFeature | ProjectFeature:
-        """
-        Get feature flags.
-
-        Returns a project's features if project_id is given, otherwise the
-        workspace's features.
-
-        Args:
-            project_id: UUID of the project. Omit for workspace features.
-
-        Returns:
-            ProjectFeature when project_id is given, otherwise WorkspaceFeature.
-        """
+        """Get feature flags."""
         client, workspace_slug = get_plane_client_context()
         try:
             if project_id is not None:
@@ -94,47 +69,3 @@ def register_workspace_tools(mcp: FastMCP) -> None:
                 wiki=False,
                 pi=False,
             )
-
-    @mcp.tool()
-    def update_workspace_features(
-        project_grouping: bool | None = None,
-        initiatives: bool | None = None,
-        teams: bool | None = None,
-        customers: bool | None = None,
-        wiki: bool | None = None,
-        pi: bool | None = None,
-    ) -> WorkspaceFeature:
-        """
-        Update features of the current workspace.
-
-        Args:
-            project_grouping: Enable/disable project grouping feature
-            initiatives: Enable/disable initiatives feature
-            teams: Enable/disable teams feature
-            customers: Enable/disable customers feature
-            wiki: Enable/disable wiki feature
-            pi: Enable/disable PI (Program Increment) feature
-
-        Returns:
-            Updated WorkspaceFeature object
-        """
-        client, workspace_slug = get_plane_client_context()
-
-        # Build data dict with only non-None values
-        feature_data: dict[str, bool] = {}
-        if project_grouping is not None:
-            feature_data["project_grouping"] = project_grouping
-        if initiatives is not None:
-            feature_data["initiatives"] = initiatives
-        if teams is not None:
-            feature_data["teams"] = teams
-        if customers is not None:
-            feature_data["customers"] = customers
-        if wiki is not None:
-            feature_data["wiki"] = wiki
-        if pi is not None:
-            feature_data["pi"] = pi
-
-        data = WorkspaceFeature(**feature_data)
-
-        return client.workspaces.update_features(workspace_slug=workspace_slug, data=data)
