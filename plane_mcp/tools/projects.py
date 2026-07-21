@@ -1,6 +1,6 @@
 """Project-related tools for Plane MCP Server."""
 
-from typing import get_args
+from typing import Any, get_args
 
 from fastmcp import FastMCP
 from plane.errors.errors import HttpError
@@ -16,6 +16,109 @@ from plane.models.query_params import MemberListQueryParams, ProjectLiteListQuer
 
 from plane_mcp.client import get_plane_client_context
 from plane_mcp.tools._compat import paginated_payload
+
+
+def _project_value_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("id")
+    if hasattr(value, "id"):
+        return value.id
+    return None
+
+
+def _project_member_ids(project: dict[str, Any]) -> list[str]:
+    values = project.get("members") or project.get("project_members") or []
+    ids = []
+    for value in values:
+        value_id = _project_value_id(value)
+        if value_id:
+            ids.append(value_id)
+    return ids
+
+
+def _project_matches(
+    project: dict[str, Any],
+    query: str | None,
+    identifier: str | None,
+    is_member: bool | None,
+    archived: bool | None,
+    lead_id: str | None,
+    member_id: str | None,
+) -> bool:
+    if query:
+        needle = query.lower()
+        haystacks = [project.get("name"), project.get("identifier"), project.get("description")]
+        if not any(needle in str(value or "").lower() for value in haystacks):
+            return False
+    if identifier is not None and str(project.get("identifier") or "").lower() != identifier.lower():
+        return False
+    if is_member is not None and bool(project.get("is_member")) != is_member:
+        return False
+    if archived is not None and bool(project.get("archived_at")) != archived:
+        return False
+    if lead_id is not None and _project_value_id(project.get("project_lead")) != lead_id:
+        return False
+    if member_id is not None and member_id not in _project_member_ids(project):
+        return False
+    return True
+
+
+def _filter_projects_from_pages(
+    fetch_page: Any,
+    query: str | None,
+    identifier: str | None,
+    is_member: bool | None,
+    archived: bool | None,
+    lead_id: str | None,
+    member_id: str | None,
+    limit: int,
+    max_pages: int,
+    start_cursor: str | None = None,
+) -> dict[str, Any]:
+    results = []
+    cursor = start_cursor
+    pages_scanned = 0
+    total_scanned = 0
+    total_available = None
+    next_cursor = ""
+    has_more = False
+
+    while pages_scanned < max_pages and len(results) < limit:
+        page = fetch_page(cursor)
+        pages_scanned += 1
+        projects = page.get("results") or []
+        total_available = page.get("total_count", total_available)
+        total_scanned += len(projects)
+        next_cursor = page.get("next_cursor") or ""
+        has_more = bool(page.get("next_page_results"))
+
+        for project in projects:
+            if _project_matches(project, query, identifier, is_member, archived, lead_id, member_id):
+                results.append(project)
+                if len(results) >= limit:
+                    break
+
+        if not has_more or not next_cursor:
+            break
+        cursor = next_cursor
+
+    return {
+        "results": results,
+        "count": len(results),
+        "total_scanned": total_scanned,
+        "pages_scanned": pages_scanned,
+        "total_available": total_available,
+        "next_cursor": next_cursor if has_more else "",
+        "has_more": has_more,
+    }
+
+
+def _project_list_payload(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    return response.model_dump()
 
 
 def register_project_tools(mcp: FastMCP) -> None:
@@ -37,6 +140,86 @@ def register_project_tools(mcp: FastMCP) -> None:
                 raise
             response = client.projects.list(workspace_slug=workspace_slug, params=params)
             return PaginatedProjectLiteResponse.model_validate(response.model_dump())
+
+    @mcp.tool()
+    def filter_projects(
+        query: str | None = None,
+        identifier: str | None = None,
+        is_member: bool | None = None,
+        archived: bool | None = None,
+        lead_id: str | None = None,
+        member_id: str | None = None,
+        limit: int = 25,
+        per_page: int = 100,
+        cursor: str | None = None,
+        max_pages: int = 10,
+        order_by: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Filter/search projects client-side across paginated project pages.
+
+        Use this to find projects by exact identifier or search-like text matching
+        on name, identifier, and description. Plane self-host project-lite exposes
+        ordering, archived toggle, and cursor pagination but no rich server-side
+        filters, so this tool scans pages and filters client-side.
+
+        Args:
+            query: Case-insensitive contains match over name, identifier, description.
+            identifier: Exact project identifier match, case-insensitive (e.g. BAM).
+            is_member: Match project membership flag when returned by Plane.
+            archived: False scans active projects, True scans archived projects.
+            lead_id: Project lead user UUID when available in response.
+            member_id: Project member UUID when available in response.
+            limit: Maximum matching projects to return.
+            per_page: Projects fetched per scanned page, 1-1000.
+            cursor: Optional starting cursor to continue a previous scan.
+            max_pages: Maximum pages to scan in this call.
+            order_by: Sort before scanning, e.g. created_at, -created_at, name.
+
+        Returns:
+            results: Matching projects.
+            total_scanned: Number of projects inspected.
+            pages_scanned: Number of pages scanned.
+            next_cursor: Cursor to pass back when has_more is true.
+            has_more: True if more underlying project pages exist.
+        """
+        client, workspace_slug = get_plane_client_context()
+        safe_limit = max(1, min(limit, 100))
+        safe_per_page = max(1, min(per_page, 1000))
+        safe_max_pages = max(1, min(max_pages, 100))
+
+        def fetch_page(page_cursor: str | None) -> dict[str, Any]:
+            params = ProjectLiteListQueryParams(
+                cursor=page_cursor,
+                per_page=safe_per_page,
+                order_by=order_by,
+                include_archived=archived,
+            )
+            try:
+                response = client.projects.list_lite(workspace_slug=workspace_slug, params=params)
+            except HttpError as e:
+                if e.status_code != 404:
+                    raise
+                response = client.projects.list(workspace_slug=workspace_slug, params=params)
+            return _project_list_payload(response)
+
+        result = _filter_projects_from_pages(
+            fetch_page=fetch_page,
+            query=query,
+            identifier=identifier,
+            is_member=is_member,
+            archived=archived,
+            lead_id=lead_id,
+            member_id=member_id,
+            limit=safe_limit,
+            max_pages=safe_max_pages,
+            start_cursor=cursor,
+        )
+        result["filter_note"] = (
+            "Projects were filtered client-side after scanning Plane self-host project pages. "
+            "Use next_cursor to continue scanning if has_more is true."
+        )
+        return result
 
     @mcp.tool()
     def create_project(
