@@ -1,5 +1,7 @@
 """Tests for the shared work item cache."""
 
+import sqlite3
+
 from plane_mcp.work_item_cache import WorkItemCache, sync_work_items
 
 
@@ -14,6 +16,35 @@ def item(item_id, updated_at, priority="none", state_id="state", state_group="st
         "labels": labels or [],
         "updated_at": updated_at,
     }
+
+
+def test_cache_migrates_schema_created_by_prerelease(tmp_path):
+    path = tmp_path / "cache.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE work_items (
+                server TEXT NOT NULL, workspace TEXT NOT NULL, project_id TEXT NOT NULL, id TEXT NOT NULL,
+                name TEXT, sequence_id INTEGER, priority TEXT, state_id TEXT, state_group TEXT,
+                assignee_ids TEXT NOT NULL, label_ids TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY (server, workspace, project_id, id)
+            );
+            CREATE TABLE sync_state (
+                server TEXT NOT NULL, workspace TEXT NOT NULL, project_id TEXT NOT NULL,
+                initialized INTEGER NOT NULL, cursor TEXT, watermark TEXT,
+                PRIMARY KEY (server, workspace, project_id)
+            );
+            """
+        )
+
+    cache = WorkItemCache(path)
+    cache.upsert_items("server", "workspace", "project", [item("one", "2026-07-30T10:00:00Z")])
+
+    with sqlite3.connect(path) as connection:
+        assert "generation" in [column[1] for column in connection.execute("PRAGMA table_info(work_items)")]
+        assert {"scan_watermark", "generation", "full_synced_at"}.issubset(
+            column[1] for column in connection.execute("PRAGMA table_info(sync_state)")
+        )
 
 
 def test_cache_is_shared_across_instances_and_upserts_newer_data(tmp_path):

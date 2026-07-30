@@ -174,6 +174,16 @@ class WorkItemCache:
                 );
                 """
             )
+            work_item_columns = {row["name"] for row in connection.execute("PRAGMA table_info(work_items)")}
+            if "generation" not in work_item_columns:
+                connection.execute("ALTER TABLE work_items ADD COLUMN generation TEXT")
+            sync_state_columns = {row["name"] for row in connection.execute("PRAGMA table_info(sync_state)")}
+            if "scan_watermark" not in sync_state_columns:
+                connection.execute("ALTER TABLE sync_state ADD COLUMN scan_watermark TEXT")
+            if "generation" not in sync_state_columns:
+                connection.execute("ALTER TABLE sync_state ADD COLUMN generation TEXT")
+            if "full_synced_at" not in sync_state_columns:
+                connection.execute("ALTER TABLE sync_state ADD COLUMN full_synced_at REAL NOT NULL DEFAULT 0")
 
     def upsert_items(
         self,
