@@ -1,5 +1,6 @@
 """Plane client initialization for MCP server."""
 
+import hashlib
 import os
 from typing import NamedTuple
 
@@ -16,6 +17,12 @@ class PlaneClientContext(NamedTuple):
 
     client: PlaneClient
     workspace_slug: str
+
+
+def get_plane_cache_scope() -> str:
+    stored_access_token: AccessToken | None = get_access_token()
+    credential = stored_access_token.token if stored_access_token else os.getenv("PLANE_API_KEY", "")
+    return hashlib.sha256(credential.encode()).hexdigest()[:24] if credential else "anonymous"
 
 
 def get_plane_client_context() -> PlaneClientContext:

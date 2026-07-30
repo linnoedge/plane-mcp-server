@@ -1,5 +1,8 @@
 """Work item-related tools for Plane MCP Server."""
 
+import os
+import time
+import uuid
 from html import escape
 from typing import Any, get_args
 
@@ -14,7 +17,8 @@ from plane.models.work_items import (
     WorkItemSearch,
 )
 
-from plane_mcp.client import get_plane_client_context
+from plane_mcp.client import get_plane_cache_scope, get_plane_client_context
+from plane_mcp.work_item_cache import WorkItemCache, sync_work_items
 
 
 def _resolve_description_html(description_html: str | None, description_stripped: str | None) -> str | None:
@@ -58,6 +62,20 @@ def _value_id(value: Any) -> str | None:
     return None
 
 
+def _work_item_scan_record(item: dict[str, Any]) -> dict[str, Any]:
+    state = item.get("state")
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "sequence_id": item.get("sequence_id"),
+        "priority": item.get("priority"),
+        "state_id": _value_id(state),
+        "state_group": state.get("group") if isinstance(state, dict) else None,
+        "assignee_ids": _id_list(item.get("assignees")),
+        "label_ids": _id_list(item.get("labels")),
+    }
+
+
 def _work_item_matches(
     item: dict[str, Any],
     priority: str | None,
@@ -68,15 +86,13 @@ def _work_item_matches(
 ) -> bool:
     if priority is not None and item.get("priority") != priority:
         return False
-    state = item.get("state")
-    if state_id is not None and _value_id(state) != state_id:
+    if state_id is not None and item.get("state_id") != state_id:
         return False
-    if state_group is not None:
-        if not isinstance(state, dict) or state.get("group") != state_group:
-            return False
-    if assignee_id is not None and assignee_id not in _id_list(item.get("assignees")):
+    if state_group is not None and item.get("state_group") != state_group:
         return False
-    if label_id is not None and label_id not in _id_list(item.get("labels")):
+    if assignee_id is not None and assignee_id not in item.get("assignee_ids", []):
+        return False
+    if label_id is not None and label_id not in item.get("label_ids", []):
         return False
     return True
 
@@ -110,8 +126,9 @@ def _filter_items_from_pages(
         has_more = bool(page.get("next_page_results"))
 
         for item in items:
-            if _work_item_matches(item, priority, state_group, state_id, assignee_id, label_id):
-                results.append(item)
+            scan_record = _work_item_scan_record(item)
+            if _work_item_matches(scan_record, priority, state_group, state_id, assignee_id, label_id):
+                results.append(scan_record)
                 if len(results) >= limit:
                     break
 
@@ -296,7 +313,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         details like description_html, or manual paging. On Plane self-host,
         server-side structured filters are not reliable/exposed here; do not use
         PQL or filters. For priority/state/assignee/label filtering, prefer
-        filter_work_items, which scans list pages and filters client-side.
+        filter_work_items, which uses a shared incremental cache.
 
         Prefer project_id whenever possible. Omit project_id only for workspace-wide
         browsing, which can be large. Always keep per_page <= 100 and use fields to
@@ -320,7 +337,6 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             external_id: Exact external system id lookup/filter.
             external_source: Exact external system source lookup/filter. Use with
                 external_id when possible.
-
         Returns:
             results: Current page of work items.
             total_count: Total matching count reported by Plane, not page-bounded.
@@ -339,7 +355,6 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             external_id=external_id,
             external_source=external_source,
         )
-
         try:
             query_params = params.model_dump(exclude_none=True)
             if project_id:
@@ -366,20 +381,15 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         assignee_id: str | None = None,
         label_id: str | None = None,
         limit: int = 25,
-        per_page: int = 100,
-        cursor: str | None = None,
+        per_page: int = 50,
         max_pages: int = 10,
-        order_by: str | None = None,
-        fields: str | None = None,
-        expand: str | None = None,
     ) -> dict[str, Any]:
         """
-        Filter work items client-side across paginated list_work_items pages.
+        Filter work items through a shared incremental SQLite cache.
 
-        Use this on Plane self-host when you need practical filtering by priority,
-        state, assignee, or label. The self-host list endpoint does not apply those
-        filters server-side, so this tool scans pages using cursor pagination and
-        stops when it has limit matches, reaches max_pages, or reaches the end.
+        The cache is shared by MCP processes on the same filesystem and isolated by
+        server, workspace, credential, and project. It syncs Plane pages ordered by
+        updated_at, resumes bounded initial scans, and reconciles deletions daily.
 
         Args:
             project_id: UUID of the project to scan. Required to avoid workspace-wide scans.
@@ -389,33 +399,28 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             assignee_id: User UUID that must be assigned to the item.
             label_id: Label UUID that must be attached to the item.
             limit: Maximum matching results to return.
-            per_page: Items fetched per scanned page, 1-100. Larger is faster but heavier.
-            cursor: Optional starting cursor to continue a previous scan.
-            max_pages: Maximum number of pages to scan in this call.
-            order_by: Sort before scanning, e.g. created_at, -created_at, priority.
-            fields: Sparse fields to return. Defaults to fields needed for filtering.
-            expand: Relations to expand. Defaults to assignees,state,labels,parent.
+            per_page: Items fetched per sync page, 1-100. Defaults to 50.
+            max_pages: Maximum pages synchronized in this call. Incomplete initial
+                synchronization resumes on the next call.
 
         Returns:
-            results: Matching work items.
-            total_scanned: Number of work items inspected.
-            pages_scanned: Number of pages scanned.
-            next_cursor: Cursor to pass back for continuing the scan when has_more is true.
-            has_more: True if the underlying list still had more pages.
+            results: Matching lightweight cached work items.
+            count: Number of matching results returned.
+            sync: Synchronization status, pages fetched, items upserted, and watermark.
         """
         client, workspace_slug = get_plane_client_context()
         safe_limit = max(1, min(limit, 100))
         safe_per_page = max(1, min(per_page, 100))
         safe_max_pages = max(1, min(max_pages, 100))
-        list_fields = fields or (
-            "id,name,sequence_id,priority,state,project,assignees,labels,type_id,"
-            "description_html,start_date,target_date,created_at,updated_at,parent,is_draft"
-        )
-        list_expand = expand or "assignees,state,labels,parent"
+        list_fields = "id,name,sequence_id,priority,state,assignees,labels,updated_at"
+        list_expand = "state"
+        server = os.getenv("PLANE_INTERNAL_BASE_URL") or os.getenv("PLANE_BASE_URL", "https://api.plane.so")
+        cache_workspace = f"{workspace_slug}:{get_plane_cache_scope()}"
+        cache = WorkItemCache()
 
         def fetch_page(page_cursor: str | None) -> dict[str, Any]:
             params = WorkItemQueryParams(
-                order_by=order_by,
+                order_by="-updated_at",
                 per_page=safe_per_page,
                 cursor=page_cursor,
                 expand=list_expand,
@@ -427,22 +432,33 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             )
             return _work_item_list_payload(response)
 
-        result = _filter_items_from_pages(
+        sync_result = sync_work_items(
+            cache=cache,
+            server=server,
+            workspace=cache_workspace,
+            project_id=project_id,
             fetch_page=fetch_page,
+            owner=str(uuid.uuid4()),
+            now=time.time(),
+            max_pages=safe_max_pages,
+        )
+        results = cache.filter_items(
+            server=server,
+            workspace=cache_workspace,
+            project_id=project_id,
             priority=priority,
-            state_group=state_group,
             state_id=state_id,
+            state_group=state_group,
             assignee_id=assignee_id,
             label_id=label_id,
             limit=safe_limit,
-            max_pages=safe_max_pages,
-            start_cursor=cursor,
         )
-        result["filter_note"] = (
-            "Filters were applied client-side after scanning Plane self-host list pages. "
-            "Use next_cursor to continue scanning if has_more is true."
-        )
-        return result
+        return {
+            "results": results,
+            "count": len(results),
+            "sync": sync_result,
+            "filter_note": "Work items were filtered from the shared incremental SQLite cache.",
+        }
 
     @mcp.tool()
     def count_work_items(
