@@ -301,7 +301,8 @@ def test_filter_work_items_schema_constrains_enums_and_pagination():
         "completed",
         "cancelled",
     ]
-    assert schema["relation_match"]["enum"] == ["any", "all"]
+    assert schema["relation_match"]["anyOf"][0]["enum"] == ["any", "all"]
+    assert schema["relation_match"]["anyOf"][1] == {"type": "null"}
     assert schema["sort_by"]["enum"] == [
         "updated_at",
         "created_at",
@@ -372,6 +373,29 @@ def test_filter_work_items_returns_sync_and_generic_filter_note(monkeypatch):
         "sync": sync,
         "filter_note": "Work items were filtered from the shared incremental SQLite cache.",
     }
+
+
+def test_filter_work_items_normalizes_explicit_null_relation_match(monkeypatch):
+    registry = ToolRegistry()
+    register_work_item_tools(registry)
+    captured = {}
+
+    class Cache:
+        def filter_items(self, **kwargs):
+            captured.update(kwargs)
+            return {"results": [], "total_count": 0}
+
+    monkeypatch.setattr(
+        work_items_module,
+        "get_plane_client_context",
+        lambda: (SimpleNamespace(work_items=SimpleNamespace(_get=lambda path, params: {"results": []})), "workspace"),
+    )
+    monkeypatch.setattr(work_items_module, "WorkItemCache", Cache)
+    monkeypatch.setattr(work_items_module, "sync_work_items", lambda **kwargs: {})
+
+    registry.tools["filter_work_items"]("project", relation_match=None)
+
+    assert captured["relation_match"] == "any"
 
 
 def test_filter_work_items_retains_singular_filter_behavior(monkeypatch):

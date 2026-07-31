@@ -184,6 +184,7 @@ EXPECTED_TOOLS = [
     "delete_project",
     "delete_work_item",
     "filter_projects",
+    "filter_work_item_activities",
     "filter_work_items",
     "get_features",
     "get_me",
