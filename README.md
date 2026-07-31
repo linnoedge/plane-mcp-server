@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server for Plane integration. This server provide
 
 ## About this fork
 
-This repository is a fork of the official Plane MCP Server maintained by Plane. It keeps the upstream tool surface while adding compatibility fixes for self-hosted Plane instances, especially Plane `v1.3.1`, where several cloud/newer endpoints are unavailable or behave differently.
+This repository is a fork of the official Plane MCP Server maintained by Plane. It maintains a focused tool surface for self-hosted Plane instances, especially Plane `v1.3.1`, with compatibility behavior for endpoints that are unavailable or differ from newer deployments.
 
 Use this fork when your MCP client connects to a self-hosted Plane workspace and the official server returns 404/403 responses, ignores PQL filters, or produces oversized responses from fallback endpoints.
 
@@ -17,122 +17,65 @@ Use this fork when your MCP client connects to a self-hosted Plane workspace and
 
 ## Usage
 
-The server supports three transport methods. **We recommend using `uvx`** as it doesn't require installation.
+The server supports stdio, streamable HTTP, and legacy SSE transports. Python 3.10 or newer is required.
 
-**Requirements**:
-- **Python 3.10+** (for stdio transport, via `uvx`)
-- **Node.js 22+** (for remote transports, via `npx`)
+### Install
 
-### 1. Stdio Transport (for local use)
+Install the package from the current checkout:
 
-**MCP Client Configuration** (using uvx - recommended):
+```bash
+uv pip install -e .
+```
 
-For self-hosted Plane, pin this fork by tag:
+For development dependencies:
+
+```bash
+uv pip install -e ".[dev]"
+```
+
+### 1. Stdio Transport
+
+Use stdio when the MCP server runs on the same machine as the client:
 
 ```json
 {
   "mcpServers": {
     "plane": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "git+ssh://git@github.com/linnoedge/plane-mcp-server.git@v0.2.10-selfhost.3",
-        "plane-mcp-server",
-        "stdio"
-      ],
+      "command": "plane-mcp-server",
+      "args": ["stdio"],
       "env": {
-        "PLANE_API_KEY": "<your-api-key>",
-        "PLANE_WORKSPACE_SLUG": "<your-workspace-slug>",
-        "PLANE_BASE_URL": "https://your-plane.example.com"
+        "PLANE_API_KEY": "<api-key>",
+        "PLANE_WORKSPACE_SLUG": "<workspace-slug>",
+        "PLANE_BASE_URL": "<plane-api-base-url>"
       }
     }
   }
 }
 ```
 
-For Plane Cloud or upstream releases, use the official package configuration from the upstream repository.
+### 2. Streamable HTTP Transport
 
-### 2. Remote HTTP Transport with OAuth
+Start the HTTP server with:
 
-Connect to the hosted Plane MCP server using OAuth authentication.
-
-**URL**: `https://mcp.plane.so/http/mcp`
-
-**MCP Client Configuration** (for tools like Claude Desktop without native remote MCP support):
-
-```json
-{
-  "mcpServers": {
-    "plane": {
-      "command": "npx",
-      "args": ["mcp-remote@latest", "https://mcp.plane.so/http/mcp"]
-    }
-  }
-}
+```bash
+plane-mcp-server http
 ```
 
-**Note**: OAuth authentication will be handled automatically when connecting to the remote server.
+The HTTP process serves OAuth-authenticated streamable HTTP at `/http/mcp`, API-key-authenticated streamable HTTP at `/http/api-key/mcp`, and the legacy OAuth SSE transport at `/sse`. The API-key endpoint uses `Authorization: Bearer <api-key>` and `X-Workspace-Slug: <workspace-slug>`. Set `MCP_PATH_PREFIX` to prepend the same path segment to these routes.
 
-### 3. Remote HTTP Transport using PAT Token
+### 3. SSE Transport (Legacy)
 
-Connect to the hosted Plane MCP server using a Personal Access Token (PAT).
-
-**URL**: `https://mcp.plane.so/http/api-key/mcp`
-
-**Headers**:
-- `Authorization: Bearer <PAT_TOKEN>`
-- `X-Workspace-slug: <SLUG>`
-
-**MCP Client Configuration** (for tools like Claude Desktop without native remote MCP support):
-
-```json
-{
-  "mcpServers": {
-    "plane": {
-      "command": "npx",
-      "args": ["mcp-remote@latest", "https://mcp.plane.so/http/api-key/mcp"],
-      "headers": {
-        "Authorization": "Bearer <PAT_TOKEN>",
-        "X-Workspace-slug": "<SLUG>"
-      }
-    }
-  }
-}
-```
-
-### 4. SSE Transport (Legacy)
-
-⚠️ **Legacy Transport**: SSE (Server-Sent Events) transport is maintained for backward compatibility. New implementations should use the HTTP transport (sections 2 or 3) instead.
-
-Connect to the hosted Plane MCP server using OAuth authentication via Server-Sent Events.
-
-**URL**: `https://mcp.plane.so/sse`
-
-**MCP Client Configuration** (for tools that support SSE transport):
-
-```json
-{
-  "mcpServers": {
-    "plane": {
-      "command": "npx",
-      "args": ["mcp-remote@latest", "https://mcp.plane.so/sse"]
-    }
-  }
-}
-```
-
-**Note**: OAuth authentication will be handled automatically when connecting to the remote server. This transport is deprecated in favor of the HTTP transport.
-
+Running `plane-mcp-server http` also exposes the legacy OAuth-only SSE transport at `/sse`; there is no separate standalone SSE invocation. New clients should use streamable HTTP instead.
 
 ## Self-hosted Plane compatibility
 
 This fork includes compatibility behavior for older/self-hosted Plane deployments:
 
 - Falls back when `*-lite` endpoints are not available for projects, modules, cycles, members, and related resources.
-- Uses the working self-hosted search endpoint with `search=` instead of SDK/cloud-only search behavior.
-- Refuses PQL on Plane self-host because Plane `v1.3.1` may ignore backend PQL filters and return misleading unfiltered data.
-- Adds local project-scoped count fallback for work items.
-- Keeps workspace-wide work item counts conservative when the self-hosted backend cannot provide them safely.
+- Uses the self-host-compatible search endpoint with `search=`.
+- Does not expose PQL because affected self-hosted versions may ignore it and return misleading unfiltered data.
+- Provides project-scoped SQLite filtering and counting for work items.
+- Keeps workspace-wide work item counts conservative when the backend cannot provide them safely.
 
 ## Configuration
 
@@ -143,16 +86,42 @@ The server requires authentication via environment variables:
 - `PLANE_BASE_URL`: Base URL for Plane API (default: `https://api.plane.so`) - Optional
 - `PLANE_API_KEY`: API key for authentication (required for stdio transport)
 - `PLANE_WORKSPACE_SLUG`: Workspace slug identifier (required for stdio transport)
-- `PLANE_ACCESS_TOKEN`: Access token for authentication (alternative to API key)
 
 **Example** (for stdio transport):
 ```bash
 export PLANE_BASE_URL="https://api.plane.so"
-export PLANE_API_KEY="your-api-key"
-export PLANE_WORKSPACE_SLUG="your-workspace-slug"
+export PLANE_API_KEY="<api-key>"
+export PLANE_WORKSPACE_SLUG="<workspace-slug>"
 ```
 
-**Note**: For remote HTTP transports (OAuth or PAT), authentication is handled via the connection method (OAuth flow or PAT headers) and does not require these environment variables.
+**Note**: For remote HTTP transports, authentication is handled through the OAuth flow or API key/header authentication and does not require these stdio environment variables.
+
+### Work-item SQLite cache
+
+`filter_work_items` synchronizes a project into a shared, lightweight SQLite cache before applying filters. Plane remains the source of truth; the cache is a local projection for reliable filtering when backend filters are unavailable or inconsistent.
+
+- Default path: `~/.cache/plane-mcp-server/work-items.sqlite3`
+- Override path: set `PLANE_MCP_CACHE_PATH` to a writable SQLite file path.
+- Sharing: SQLite WAL mode and a 30-second busy timeout allow MCP server processes on the same filesystem and configured with the same cache file to share cached data. This does not provide cache sharing across hosts or filesystems. A per-project lease prevents duplicate concurrent synchronization.
+- Isolation: rows are scoped by Plane server, workspace, a hash of the active credential, and project. Raw credentials are not stored in the cache.
+
+Each call fetches at most `max_pages` pages of up to `per_page` items, ordered by descending `updated_at`. An unfinished scan stores its cursor and returns `sync.status` as `partial`; a later call resumes it. A completed scan returns `synced`. If another process holds the synchronization lease, the call filters the current cache and returns `busy`. The `sync` object also reports `pages_fetched`, `items_upserted`, and the current `watermark`.
+
+After initialization, synchronization normally fetches only records at or newer than the saved watermark. A `filter_work_items` call made after the 24-hour full-sync interval has elapsed triggers a full scan; there is no background reconciliation job. The full scan assigns a new generation and removes cached rows not seen in that completed scan, reconciling deletions. Bounded full scans resume across later filter calls, and deletion reconciliation occurs only after the scan completes.
+
+`filter_work_items` supports:
+
+- Text: case-insensitive name substring or an exact numeric sequence ID through `query`.
+- Singular scalar filters: `priority`, `state_id`, `state_group`, `type_id`, `parent_id`, `cycle_id`, and `created_by`.
+- Multi-value scalar filters: `priorities`, `state_ids`, and `state_groups`.
+- Relations: singular or multi-value assignee and label IDs, plus `module_id`. `relation_match` selects `any` or `all` for each multi-value relation list.
+- Inclusive ranges: `created_at`, `updated_at`, and `completed_at` timestamp bounds; `start_date` and `target_date` date bounds; and `sequence_id` numeric bounds, each expressed with `_from` and `_to` arguments.
+- Flags: `is_draft`, `has_assignee`, `has_label`, `has_parent`, and `overdue`. Overdue means a target date before the current UTC date in a state group other than completed or cancelled.
+- Pagination and ordering: `sort_by`, `sort_direction`, `offset`, and `limit`. Supported sort fields are `updated_at`, `created_at`, `sequence_id`, `priority`, `start_date`, `target_date`, and `name`; the work-item ID provides stable secondary ordering.
+
+Singular and multi-value filters can be combined. Filter arguments do not narrow synchronization; they are applied to the cached project after the bounded sync. Range boundaries are inclusive. `limit` is 1-100 and controls returned rows, while `total_count` reports all cached matches before `offset` and `limit`; `count` reports rows in the current result.
+
+Results are lightweight cache records rather than complete Plane work-item models. They contain IDs and cached scalar fields such as name, sequence, priority, state group, relation ID lists, dates, timestamps, and draft state. Use `retrieve_work_item` when full details, description content, or expanded objects are required. Until the initial scan reaches `synced`, filtered results and `total_count` cover only the pages cached so far; `busy` results may also lag until the active synchronizer finishes.
 
 ### OAuth redirect URIs
 
@@ -163,7 +132,7 @@ To onboard a new client without a code change or release, append extra patterns 
 - `PLANE_OAUTH_ALLOWED_REDIRECT_URIS`: Comma-separated redirect URI patterns appended to the built-in allowlist.
 
 ```bash
-export PLANE_OAUTH_ALLOWED_REDIRECT_URIS="https://newclient.com/cb,https://other.app/oauth/*"
+export PLANE_OAUTH_ALLOWED_REDIRECT_URIS="https://client.example.com/callback,https://connector.example.com/oauth/*"
 ```
 
 Patterns support glob matching (`*` matches any port, path segment, or subdomain). For security, keep the host pinned and wildcard only the port/path.
@@ -172,7 +141,7 @@ Patterns support glob matching (`*` matches any port, path segment, or subdomain
 
 The server emits structured JSON logs. Each tool call is logged with its tool name, duration, status, and (when available) the opaque user id and workspace slug.
 
-- `LOG_USER_INFO`: When `true`, include user info (PII such as the display name) in logs alongside the opaque user id. Defaults to `false` so PII is never logged unless explicitly opted in. Only the OAuth and PAT (header) HTTP transports carry a display name; stdio is unaffected.
+- `LOG_USER_INFO`: When `true`, include user info (PII such as the display name) in logs alongside the opaque user id. Defaults to `false` so PII is never logged unless explicitly opted in. Only the OAuth and API key/header HTTP transports carry a display name; stdio is unaffected.
 
 ```bash
 export LOG_USER_INFO="true"
@@ -180,210 +149,18 @@ export LOG_USER_INFO="true"
 
 ## Available Tools
 
-The server provides comprehensive tools for interacting with Plane. All tools use Pydantic models from the Plane SDK for type safety and validation.
+The currently registered tool surface is intentionally limited to operations supported reliably by this server:
 
-### Projects
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_projects` | List all projects in a workspace with optional pagination and filtering |
-| `create_project` | Create a new project with name, identifier, and optional configuration |
-| `retrieve_project` | Retrieve a project by ID |
-| `update_project` | Update a project with partial data |
-| `delete_project` | Delete a project by ID |
-| `get_project_worklog_summary` | Get work log summary for a project |
-| `get_project_members` | Get all members of a project |
-| `update_project_features` | Update features configuration of a project |
-
-### Work Items
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_items` | List all work items in a project with optional filtering and pagination |
-| `create_work_item` | Create a new work item with name, assignees, labels, and other attributes |
-| `retrieve_work_item` | Retrieve a work item by ID with optional field expansion |
-| `retrieve_work_item_by_identifier` | Retrieve a work item by project identifier and issue sequence number |
-| `update_work_item` | Update a work item with partial data |
-| `delete_work_item` | Delete a work item by ID |
-| `search_work_items` | Search work items across a workspace with query string |
-
-### Cycles
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_cycles` | List cycles in a project (set `archived=true` for archived) |
-| `create_cycle` | Create a new cycle with name, dates, and owner |
-| `retrieve_cycle` | Retrieve a cycle by ID |
-| `update_cycle` | Update a cycle with partial data |
-| `delete_cycle` | Delete a cycle by ID |
-| `manage_cycle_work_items` | Add and/or remove work items on a cycle |
-| `list_cycle_work_items` | List work items in a cycle |
-| `transfer_cycle_work_items` | Transfer work items from one cycle to another |
-| `manage_cycle_archive` | Archive or unarchive a cycle |
-
-### Modules
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_modules` | List modules in a project (set `archived=true` for archived) |
-| `create_module` | Create a new module with name, dates, status, and members |
-| `retrieve_module` | Retrieve a module by ID |
-| `update_module` | Update a module with partial data |
-| `delete_module` | Delete a module by ID |
-| `manage_module_work_items` | Add and/or remove work items on a module |
-| `list_module_work_items` | List work items in a module |
-| `manage_module_archive` | Archive or unarchive a module |
-
-### Initiatives
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_initiatives` | List all initiatives in a workspace |
-| `create_initiative` | Create a new initiative with name, dates, state, and lead |
-| `retrieve_initiative` | Retrieve an initiative by ID |
-| `update_initiative` | Update an initiative with partial data |
-| `delete_initiative` | Delete an initiative by ID |
-
-### Intake Work Items
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_intake_work_items` | List all intake work items in a project with optional pagination |
-| `create_intake_work_item` | Create a new intake work item in a project |
-| `retrieve_intake_work_item` | Retrieve an intake work item by work item ID with optional field expansion |
-| `update_intake_work_item` | Update an intake work item with partial data |
-| `delete_intake_work_item` | Delete an intake work item by work item ID |
-
-### Work Item Properties
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_properties` | List work item properties for a work item type |
-| `create_work_item_property` | Create a new work item property with type, settings, and validation rules |
-| `retrieve_work_item_property` | Retrieve a work item property by ID |
-| `update_work_item_property` | Update a work item property with partial data |
-| `delete_work_item_property` | Delete a work item property by ID |
-
-### Milestones
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_milestones` | List all milestones in a project |
-| `create_milestone` | Create a new milestone |
-| `retrieve_milestone` | Retrieve a milestone by ID |
-| `update_milestone` | Update a milestone by ID |
-| `delete_milestone` | Delete a milestone by ID |
-| `manage_milestone_work_items` | Add and/or remove work items on a milestone |
-| `list_milestone_work_items` | List work items in a milestone |
-
-### Labels
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_labels` | List all labels in a project |
-| `create_label` | Create a new label |
-| `retrieve_label` | Retrieve a label by ID |
-| `update_label` | Update a label by ID |
-| `delete_label` | Delete a label by ID |
-
-### States
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_states` | List all states in a project |
-| `create_state` | Create a new state |
-| `retrieve_state` | Retrieve a state by ID |
-| `update_state` | Update a state by ID |
-| `delete_state` | Delete a state by ID |
-
-### Work Item Comments
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_comments` | List comments for a work item |
-| `retrieve_work_item_comment` | Retrieve a specific comment for a work item |
-| `create_work_item_comment` | Create a comment for a work item |
-| `update_work_item_comment` | Update a comment for a work item |
-| `delete_work_item_comment` | Delete a comment for a work item |
-
-### Work Item Links
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_links` | List links for a work item |
-| `retrieve_work_item_link` | Retrieve a specific link for a work item |
-| `create_work_item_link` | Create a link for a work item |
-| `update_work_item_link` | Update a link for a work item |
-| `delete_work_item_link` | Delete a link for a work item |
-
-### Work Item Types
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_types` | List all work item types in a project |
-| `create_work_item_type` | Create a new work item type |
-| `retrieve_work_item_type` | Retrieve a work item type by ID |
-| `update_work_item_type` | Update a work item type by ID |
-| `delete_work_item_type` | Delete a work item type by ID |
-| `import_work_item_types_to_project` | Bulk-link workspace-level work item types to a project |
-| `resolve_work_item_type` | Find or create a named type for a project, auto-handling workspace vs project scope and import |
-
-### Work Item Relations
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_relations` | List relations for a work item |
-| `create_work_item_relation` | Create relations for a work item |
-| `remove_work_item_relation` | Remove a relation from a work item |
-
-### Work Item Relation Definitions
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_relation_definitions` | List workspace custom relation definitions |
-| `create_work_item_relation_definition` | Create a workspace relation definition |
-| `update_work_item_relation_definition` | Update a relation definition |
-| `delete_work_item_relation_definition` | Delete a relation definition |
-
-### Work Item Activities
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_item_activities` | List activities for a work item |
-| `retrieve_work_item_activity` | Retrieve a specific activity for a work item |
-
-### Work Logs
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_work_logs` | List work logs for a work item |
-| `create_work_log` | Create a work log for a work item |
-| `update_work_log` | Update a work log for a work item |
-| `delete_work_log` | Delete a work log for a work item |
-
-### Pages
-
-| Tool Name | Description |
-|-----------|-------------|
-| `list_pages` | List pages (workspace, or a project's if `project_id` given) |
-| `retrieve_page` | Retrieve a page by ID (workspace, or project's if `project_id` given) |
-| `create_page` | Create a workspace or project page |
-
-### Workspaces
-
-| Tool Name | Description |
-|-----------|-------------|
-| `get_workspace_members` | Get all members of the current workspace |
-| `get_features` | Get feature flags (workspace, or a project's if `project_id` given) |
-| `update_workspace_features` | Update features of the current workspace |
-
-### Users
-
-| Tool Name | Description |
-|-----------|-------------|
-| `get_me` | Get current authenticated user information |
-
-**Total Tools**: 100+ tools across 20 categories
+| Area | Tools |
+|------|-------|
+| Projects | `list_projects`, `filter_projects`, `create_project`, `retrieve_project`, `update_project`, `delete_project`, `manage_project_archive`, `get_project_members` |
+| Work items | `list_work_items`, `filter_work_items`, `count_work_items`, `create_work_item`, `retrieve_work_item`, `retrieve_work_item_by_identifier`, `update_work_item`, `delete_work_item`, `manage_work_item_assignee`, `manage_work_item_label`, `search_work_items` |
+| Attachments | `list_work_item_attachments`, `get_work_item_attachment_download_url`, `upload_work_item_attachment_from_url`, `delete_work_item_attachment`, `read_work_item_attachment` |
+| Comments | `list_work_item_comments`, `retrieve_work_item_comment`, `create_work_item_comment`, `update_work_item_comment` |
+| Links | `list_work_item_links`, `retrieve_work_item_link`, `create_work_item_link`, `update_work_item_link` |
+| Relations and activities | `list_work_item_relations`, `create_work_item_relation`, `list_work_item_activities`, `retrieve_work_item_activity` |
+| Project metadata | `list_cycles`, `list_modules`, `list_intake_work_items`, `list_labels`, `create_label`, `retrieve_label`, `update_label`, `list_states`, `create_state`, `retrieve_state`, `update_state` |
+| Workspace metadata | `list_initiatives`, `list_pages`, `list_work_item_properties`, `list_work_item_types`, `get_workspace_members`, `get_features`, `get_me` |
 
 ## Development
 
@@ -393,10 +170,10 @@ The server provides comprehensive tools for interacting with Plane. All tools us
 pytest
 ```
 
-### Code Formatting
+### Code Formatting and Linting
 
 ```bash
-black plane_mcp/
+ruff format plane_mcp/
 ruff check plane_mcp/
 ```
 

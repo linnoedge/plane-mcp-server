@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 from html import escape
-from typing import Any, get_args
+from typing import Annotated, Any, Literal, get_args
 
 from fastmcp import FastMCP
 from plane.errors.errors import HttpError
@@ -16,6 +16,7 @@ from plane.models.work_items import (
     WorkItem,
     WorkItemSearch,
 )
+from pydantic import Field
 
 from plane_mcp.client import get_plane_cache_scope, get_plane_client_context
 from plane_mcp.work_item_cache import WorkItemCache, sync_work_items
@@ -375,14 +376,48 @@ def register_work_item_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     def filter_work_items(
         project_id: str,
-        priority: str | None = None,
+        priority: Literal["urgent", "high", "medium", "low", "none"] | None = None,
         state_id: str | None = None,
-        state_group: str | None = None,
+        state_group: Literal["backlog", "unstarted", "started", "completed", "cancelled"] | None = None,
         assignee_id: str | None = None,
         label_id: str | None = None,
-        limit: int = 25,
-        per_page: int = 50,
-        max_pages: int = 10,
+        query: str | None = None,
+        priorities: list[Literal["urgent", "high", "medium", "low", "none"]] | None = None,
+        state_ids: list[str] | None = None,
+        state_groups: list[Literal["backlog", "unstarted", "started", "completed", "cancelled"]] | None = None,
+        assignee_ids: list[str] | None = None,
+        label_ids: list[str] | None = None,
+        relation_match: Literal["any", "all"] = "any",
+        type_id: str | None = None,
+        parent_id: str | None = None,
+        cycle_id: str | None = None,
+        module_id: str | None = None,
+        created_by: str | None = None,
+        created_at_from: str | None = None,
+        created_at_to: str | None = None,
+        updated_at_from: str | None = None,
+        updated_at_to: str | None = None,
+        start_date_from: str | None = None,
+        start_date_to: str | None = None,
+        target_date_from: str | None = None,
+        target_date_to: str | None = None,
+        completed_at_from: str | None = None,
+        completed_at_to: str | None = None,
+        sequence_id_from: int | None = None,
+        sequence_id_to: int | None = None,
+        is_draft: bool | None = None,
+        has_assignee: bool | None = None,
+        has_label: bool | None = None,
+        has_parent: bool | None = None,
+        overdue: bool | None = None,
+        sort_by: Literal[
+            "updated_at", "created_at", "sequence_id", "priority", "start_date", "target_date", "name"
+        ] = "updated_at",
+        sort_direction: Literal["asc", "desc"] = "desc",
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=100)] = 25,
+        per_page: Annotated[int, Field(ge=1, le=100)] = 50,
+        max_pages: Annotated[int, Field(ge=1, le=100)] = 10,
     ) -> dict[str, Any]:
         """
         Filter work items through a shared incremental SQLite cache.
@@ -398,6 +433,38 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             state_group: State group: backlog, unstarted, started, completed, cancelled.
             assignee_id: User UUID that must be assigned to the item.
             label_id: Label UUID that must be attached to the item.
+            query: Case-insensitive name text or exact sequence ID.
+            priorities: Priorities matched with OR.
+            state_ids: State UUIDs matched with OR.
+            state_groups: State groups matched with OR.
+            assignee_ids: Assignee UUIDs matched using relation_match.
+            label_ids: Label UUIDs matched using relation_match.
+            relation_match: Use any or all for multi-value relation filters.
+            type_id: Exact work item type UUID.
+            parent_id: Exact parent work item UUID.
+            cycle_id: Exact cycle UUID.
+            module_id: Module UUID that must be attached to the item.
+            created_by: Exact creator UUID.
+            created_at_from: Inclusive minimum creation timestamp.
+            created_at_to: Inclusive maximum creation timestamp.
+            updated_at_from: Inclusive minimum update timestamp.
+            updated_at_to: Inclusive maximum update timestamp.
+            start_date_from: Inclusive minimum start date.
+            start_date_to: Inclusive maximum start date.
+            target_date_from: Inclusive minimum target date.
+            target_date_to: Inclusive maximum target date.
+            completed_at_from: Inclusive minimum completion timestamp.
+            completed_at_to: Inclusive maximum completion timestamp.
+            sequence_id_from: Inclusive minimum sequence ID.
+            sequence_id_to: Inclusive maximum sequence ID.
+            is_draft: Match draft status.
+            has_assignee: Match whether any assignee is present.
+            has_label: Match whether any label is present.
+            has_parent: Match whether a parent is present.
+            overdue: Match whether the target date is overdue.
+            sort_by: Cached field used to sort results.
+            sort_direction: Sort direction, asc or desc.
+            offset: Number of matching cached records to skip.
             limit: Maximum matching results to return.
             per_page: Items fetched per sync page, 1-100. Defaults to 50.
             max_pages: Maximum pages synchronized in this call. Incomplete initial
@@ -406,13 +473,23 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         Returns:
             results: Matching lightweight cached work items.
             count: Number of matching results returned.
+            total_count: Number of matching cached records before pagination.
             sync: Synchronization status, pages fetched, items upserted, and watermark.
         """
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if not 1 <= per_page <= 100:
+            raise ValueError("per_page must be between 1 and 100")
+        if not 1 <= max_pages <= 100:
+            raise ValueError("max_pages must be between 1 and 100")
+
         client, workspace_slug = get_plane_client_context()
-        safe_limit = max(1, min(limit, 100))
-        safe_per_page = max(1, min(per_page, 100))
-        safe_max_pages = max(1, min(max_pages, 100))
-        list_fields = "id,name,sequence_id,priority,state,assignees,labels,updated_at"
+        list_fields = (
+            "id,name,sequence_id,priority,state,assignees,labels,type_id,parent,cycle,modules,created_by,"
+            "created_at,updated_at,start_date,target_date,completed_at,is_draft"
+        )
         list_expand = "state"
         server = os.getenv("PLANE_INTERNAL_BASE_URL") or os.getenv("PLANE_BASE_URL", "https://api.plane.so")
         cache_workspace = f"{workspace_slug}:{get_plane_cache_scope()}"
@@ -421,7 +498,7 @@ def register_work_item_tools(mcp: FastMCP) -> None:
         def fetch_page(page_cursor: str | None) -> dict[str, Any]:
             params = WorkItemQueryParams(
                 order_by="-updated_at",
-                per_page=safe_per_page,
+                per_page=per_page,
                 cursor=page_cursor,
                 expand=list_expand,
                 fields=list_fields,
@@ -440,9 +517,9 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             fetch_page=fetch_page,
             owner=str(uuid.uuid4()),
             now=time.time(),
-            max_pages=safe_max_pages,
+            max_pages=max_pages,
         )
-        results = cache.filter_items(
+        filtered = cache.filter_items(
             server=server,
             workspace=cache_workspace,
             project_id=project_id,
@@ -451,11 +528,45 @@ def register_work_item_tools(mcp: FastMCP) -> None:
             state_group=state_group,
             assignee_id=assignee_id,
             label_id=label_id,
-            limit=safe_limit,
+            query=query,
+            priorities=priorities,
+            state_ids=state_ids,
+            state_groups=state_groups,
+            assignee_ids=assignee_ids,
+            label_ids=label_ids,
+            relation_match=relation_match,
+            type_id=type_id,
+            parent_id=parent_id,
+            cycle_id=cycle_id,
+            module_id=module_id,
+            created_by=created_by,
+            created_at_from=created_at_from,
+            created_at_to=created_at_to,
+            updated_at_from=updated_at_from,
+            updated_at_to=updated_at_to,
+            start_date_from=start_date_from,
+            start_date_to=start_date_to,
+            target_date_from=target_date_from,
+            target_date_to=target_date_to,
+            completed_at_from=completed_at_from,
+            completed_at_to=completed_at_to,
+            sequence_id_from=sequence_id_from,
+            sequence_id_to=sequence_id_to,
+            is_draft=is_draft,
+            has_assignee=has_assignee,
+            has_label=has_label,
+            has_parent=has_parent,
+            overdue=overdue,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            offset=offset,
+            limit=limit,
         )
+        results = filtered["results"]
         return {
             "results": results,
             "count": len(results),
+            "total_count": filtered["total_count"],
             "sync": sync_result,
             "filter_note": "Work items were filtered from the shared incremental SQLite cache.",
         }
