@@ -251,7 +251,23 @@ def register_work_item_activity_tools(mcp: FastMCP) -> None:
         cursor: str | None = None,
         max_pages: int = 10,
     ) -> list[WorkItemActivity]:
-        """List activities for a work item with client-side filtering."""
+        """List activities for a work item, preserving the legacy list return shape.
+
+        Use this for callers that need only activity records. Plane self-host ignores
+        activity filters, so this tool scans cursor pages and filters client-side.
+        Use created_at_from/created_at_to or updated_at_from/updated_at_to for
+        inclusive timestamp ranges. Timestamps must be strict ISO-8601 values with a
+        timezone; values are compared in UTC. activity_type, verb, field, and actor
+        are exact, case-sensitive filters. Legacy params keys created_at__gt,
+        created_at__gte, created_at__lt, created_at__lte and updated_at equivalents
+        remain supported; explicit arguments take precedence.
+
+        per_page controls the server page size, cursor selects the first page,
+        max_pages bounds the client-side scan, and limit caps returned matches. All
+        bounds are 1-100. The result is list[WorkItemActivity] without pagination
+        metadata; use filter_work_item_activities when scan/truncation metadata or a
+        safe continuation cursor is required.
+        """
         result = filter_activities(
             project_id,
             work_item_id,
@@ -289,7 +305,24 @@ def register_work_item_activity_tools(mcp: FastMCP) -> None:
         cursor: str | None = None,
         max_pages: int = 10,
     ) -> dict[str, Any]:
-        """Filter activities and return bounded scan metadata."""
+        """Filter work-item activities by time or exact fields with scan metadata.
+
+        Use this when filtering activity history, especially by time, or when the
+        caller needs bounded-scan metadata. Plane self-host ignores activity filters,
+        so created_at_from/created_at_to and updated_at_from/updated_at_to are applied
+        client-side as inclusive ranges after cursor pages are fetched. Timestamps
+        must be strict ISO-8601 values with a timezone and are compared in UTC.
+        activity_type, verb, field, and actor use exact, case-sensitive matching.
+        Legacy params range keys are accepted, but explicit arguments take precedence.
+
+        per_page controls server page size, cursor selects the first page, max_pages
+        bounds scanning, and limit caps returned matches; each numeric bound is 1-100.
+        Returns results, count, total_matches, total_scanned, pages_scanned,
+        results_truncated, scan_has_more, has_more, and next_cursor. When matching
+        results are truncated within scanned pages, has_more is false and next_cursor
+        is empty because continuing would skip matches. If max_pages stops cleanly at
+        a page boundary, has_more and next_cursor provide safe continuation.
+        """
         return filter_activities(
             project_id,
             work_item_id,

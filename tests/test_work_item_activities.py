@@ -1,9 +1,11 @@
 """Tests for work-item activity client-side filtering."""
 
+import asyncio
 from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
+from fastmcp import Client, FastMCP
 from plane.models.work_items import PaginatedWorkItemActivityResponse, WorkItemActivity
 
 from plane_mcp.tools.work_item_activities import _filter_activity_pages, register_work_item_activity_tools
@@ -50,6 +52,45 @@ def _register(monkeypatch, pages):
     client = SimpleNamespace(work_items=SimpleNamespace(activities=Activities()))
     monkeypatch.setattr(activities_module, "get_plane_client_context", lambda: (client, "workspace"))
     return registry.tools, calls
+
+
+async def _activity_tools_list():
+    mcp = FastMCP("test")
+    register_work_item_activity_tools(mcp)
+    async with Client(mcp) as client:
+        return {tool.name: tool for tool in await client.list_tools()}
+
+
+def test_activity_tool_descriptions_explain_time_filtering_and_bounded_scans():
+    tools = asyncio.run(_activity_tools_list())
+    list_tool = tools["list_work_item_activities"]
+    filter_tool = tools["filter_work_item_activities"]
+
+    for tool in (list_tool, filter_tool):
+        assert "created_at_from" in tool.description
+        assert "created_at_to" in tool.description
+        assert "updated_at_from" in tool.description
+        assert "updated_at_to" in tool.description
+        assert "client-side" in tool.description
+        assert "inclusive" in tool.description
+        assert "ISO-8601" in tool.description
+        assert "timezone" in tool.description
+        assert "max_pages" in tool.description
+        assert "per_page" in tool.description
+
+    assert "Use this when" in filter_tool.description
+    assert "metadata" in filter_tool.description
+    assert "results_truncated" in filter_tool.description
+    assert "next_cursor" in filter_tool.description
+    assert "legacy" in list_tool.description
+
+    properties = filter_tool.inputSchema["properties"]
+    assert properties["created_at_from"]["default"] is None
+    assert properties["created_at_to"]["default"] is None
+    assert properties["updated_at_from"]["default"] is None
+    assert properties["updated_at_to"]["default"] is None
+    assert properties["limit"]["default"] == 50
+    assert properties["max_pages"]["default"] == 10
 
 
 def test_filter_activity_pages_scans_cursors_and_excludes_ignored_server_range_results():
