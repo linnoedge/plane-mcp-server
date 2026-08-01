@@ -433,6 +433,177 @@ def test_cache_rejects_invalid_filters(tmp_path, arguments, message):
         cache.filter_items("server", "workspace", "project", **arguments)
 
 
+def test_forced_full_sync_reconciles_deletions_even_when_cache_is_fresh(tmp_path):
+    cache = WorkItemCache(tmp_path / "cache.sqlite3")
+    cache.upsert_items(
+        "server",
+        "workspace",
+        "project",
+        [item("kept", "2026-07-30T10:00:00Z"), item("deleted", "2026-07-29T10:00:00Z")],
+    )
+    cache.set_sync_state(
+        "server",
+        "workspace",
+        "project",
+        True,
+        None,
+        "2026-07-30T10:00:00Z",
+        full_synced_at=99,
+    )
+    page = {
+        "results": [item("kept", "2026-07-30T10:00:00Z")],
+        "total_count": 1,
+        "next_page_results": False,
+    }
+
+    result = sync_work_items(
+        cache,
+        "server",
+        "workspace",
+        "project",
+        lambda cursor: page,
+        owner="forced-generation",
+        now=100,
+        force_full=True,
+    )
+
+    assert result["status"] == "synced"
+    assert [record["id"] for record in cache.filter_items("server", "workspace", "project")["results"]] == ["kept"]
+
+
+@pytest.mark.parametrize(
+    "pages, message",
+    [
+        (
+            [
+                {
+                    "results": [item("one", "2026-07-30T10:00:00Z")],
+                    "total_count": 2,
+                    "next_cursor": "two",
+                    "next_page_results": True,
+                },
+                {"results": [item("two", "2026-07-30T11:00:00Z")], "total_count": 3, "next_page_results": False},
+            ],
+            "total changed",
+        ),
+        (
+            [
+                {
+                    "results": [item("one", "2026-07-30T10:00:00Z")],
+                    "total_count": 2,
+                    "next_cursor": "two",
+                    "next_page_results": True,
+                },
+                {"results": [], "total_count": 2, "next_page_results": False},
+            ],
+            "raw count mismatch",
+        ),
+    ],
+)
+def test_forced_full_sync_rejects_unstable_or_incomplete_snapshot(tmp_path, pages, message):
+    cache = WorkItemCache(tmp_path / "cache.sqlite3")
+
+    with pytest.raises(RuntimeError, match=message):
+        sync_work_items(
+            cache,
+            "server",
+            "workspace",
+            "project",
+            lambda cursor: pages[0 if cursor is None else 1],
+            owner="forced-generation",
+            now=100,
+            force_full=True,
+        )
+
+
+def test_forced_full_sync_restarts_after_mid_page_failure_and_reconciles_deletions(tmp_path):
+    cache = WorkItemCache(tmp_path / "cache.sqlite3")
+    cache.upsert_items(
+        "server",
+        "workspace",
+        "project",
+        [item("kept", "2026-07-30T10:00:00Z"), item("stale", "2026-07-29T10:00:00Z")],
+    )
+    cache.set_sync_state(
+        "server",
+        "workspace",
+        "project",
+        True,
+        None,
+        "2026-07-30T10:00:00Z",
+        full_synced_at=99,
+    )
+    requested = []
+    fail_later_page = True
+
+    def fetch(cursor):
+        nonlocal fail_later_page
+        requested.append(cursor)
+        if cursor is None:
+            return {
+                "results": [item("kept", "2026-07-30T10:00:00Z")],
+                "total_count": 2,
+                "next_cursor": "page-2",
+                "next_page_results": True,
+            }
+        if fail_later_page:
+            fail_later_page = False
+            raise RuntimeError("later page failed")
+        return {
+            "results": [item("new", "2026-07-28T10:00:00Z")],
+            "total_count": 2,
+            "next_page_results": False,
+        }
+
+    with pytest.raises(RuntimeError, match="later page failed"):
+        sync_work_items(
+            cache,
+            "server",
+            "workspace",
+            "project",
+            fetch,
+            owner="failed-generation",
+            now=100,
+            force_full=True,
+        )
+
+    result = sync_work_items(
+        cache,
+        "server",
+        "workspace",
+        "project",
+        fetch,
+        owner="fresh-generation",
+        now=101,
+        force_full=True,
+    )
+
+    assert requested == [None, "page-2", None, "page-2"]
+    assert result["status"] == "synced"
+    assert {record["id"] for record in cache.filter_items("server", "workspace", "project")["results"]} == {
+        "kept",
+        "new",
+    }
+
+
+def test_read_snapshot_keeps_count_and_offset_rows_consistent(tmp_path):
+    cache = WorkItemCache(tmp_path / "cache.sqlite3")
+    cache.upsert_items(
+        "server",
+        "workspace",
+        "project",
+        [item("one", "2026-07-30T10:00:00Z"), item("two", "2026-07-30T11:00:00Z")],
+    )
+
+    with cache.read_snapshot() as snapshot:
+        first = snapshot.filter_items("server", "workspace", "project", limit=1, offset=0)
+        cache.upsert_items("server", "workspace", "project", [item("three", "2026-07-30T12:00:00Z")])
+        second = snapshot.filter_items("server", "workspace", "project", limit=1, offset=1)
+
+    assert first["total_count"] == second["total_count"] == 2
+    assert {first["results"][0]["id"], second["results"][0]["id"]} == {"one", "two"}
+
+
 def test_initial_sync_resumes_from_saved_cursor_until_complete(tmp_path):
     cache = WorkItemCache(tmp_path / "cache.sqlite3")
     requested = []

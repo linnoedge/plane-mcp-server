@@ -173,6 +173,7 @@ def test_full_integration():
 
 # Expected tools that should be registered with the self-host MCP server
 EXPECTED_TOOLS = [
+    "collect_weekly_report_bundle",
     "count_work_items",
     "create_label",
     "create_project",

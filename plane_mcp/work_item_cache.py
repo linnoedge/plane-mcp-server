@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import time
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Event, Thread
@@ -78,6 +79,7 @@ def sync_work_items(
     clock: Any = time.time,
     lease_seconds: float = LEASE_SECONDS,
     heartbeat_interval: float | None = None,
+    force_full: bool = False,
 ) -> dict[str, Any]:
     if not cache.acquire_lease(server, workspace, project_id, owner, now, lease_seconds):
         return {
@@ -98,8 +100,8 @@ def sync_work_items(
     heartbeat_thread.start()
     state = cache.sync_state(server, workspace, project_id)
     initialized = bool(state and state["initialized"])
-    continuing = bool(state and state["cursor"])
-    full_sync = (
+    continuing = bool(state and state["cursor"] and not force_full)
+    full_sync = force_full or (
         bool(state and state["generation"])
         if continuing
         else (not initialized or not state or now - state["full_synced_at"] >= FULL_SYNC_INTERVAL_SECONDS)
@@ -110,12 +112,23 @@ def sync_work_items(
     pages_fetched = 0
     items_upserted = 0
     completed = False
+    expected_total = None
+    raw_scanned = 0
 
     try:
         while pages_fetched < max_pages:
             page = fetch_page(cursor)
             pages_fetched += 1
             page_items = page.get("results") or []
+            if force_full:
+                total_count = page.get("total_count")
+                if not isinstance(total_count, int) or total_count < 0:
+                    raise RuntimeError("forced full sync requires a valid total_count")
+                if expected_total is None:
+                    expected_total = total_count
+                elif total_count != expected_total:
+                    raise RuntimeError("forced full sync total changed during pagination")
+                raw_scanned += len(page_items)
             accepted = [
                 item
                 for item in page_items
@@ -147,6 +160,8 @@ def sync_work_items(
             cache.renew_lease(server, workspace, project_id, owner, clock(), lease_seconds)
 
         latest_watermark = cache.watermark(server, workspace, project_id)
+        if completed and force_full and raw_scanned != expected_total:
+            raise RuntimeError("forced full sync raw count mismatch")
         if completed:
             initialized = True
             if full_sync and generation:
@@ -193,6 +208,15 @@ def default_cache_path() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".cache" / "plane-mcp-server" / "work-items.sqlite3"
+
+
+class _WorkItemCacheSnapshot:
+    def __init__(self, cache: "WorkItemCache", connection: sqlite3.Connection):
+        self._cache = cache
+        self._snapshot_connection = connection
+
+    def filter_items(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return WorkItemCache.filter_items(self, *args, **kwargs)
 
 
 class WorkItemCache:
@@ -481,6 +505,20 @@ class WorkItemCache:
                 (server, workspace, project_id, generation),
             )
 
+    @contextmanager
+    def read_snapshot(self):
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            connection.execute("SELECT COUNT(*) FROM work_items").fetchone()
+            yield _WorkItemCacheSnapshot(self, connection)
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def filter_items(
         self,
         server: str,
@@ -645,7 +683,10 @@ class WorkItemCache:
             values.append(_utc_today())
 
         where = " AND ".join(clauses)
-        with self._connect() as connection:
+        connection_context = (
+            self._connect() if not hasattr(self, "_snapshot_connection") else nullcontext(self._snapshot_connection)
+        )
+        with connection_context as connection:
             total_count = connection.execute(f"SELECT COUNT(*) FROM work_items WHERE {where}", values).fetchone()[0]
             order = f"{sort_by} {sort_direction.upper()}, id ASC"
             rows = connection.execute(

@@ -11,6 +11,7 @@ from plane_mcp.tools.pages import register_page_tools
 from plane_mcp.tools.projects import register_project_tools
 from plane_mcp.tools.states import register_state_tools
 from plane_mcp.tools.users import register_user_tools
+from plane_mcp.tools.weekly_report import register_weekly_report_tools
 from plane_mcp.tools.work_item_activities import register_work_item_activity_tools
 from plane_mcp.tools.work_item_attachments import register_work_item_attachment_tools
 from plane_mcp.tools.work_item_comments import register_work_item_comment_tools
@@ -42,3 +43,4 @@ def register_tools(mcp: FastMCP) -> None:
     register_work_item_type_tools(mcp)
     register_state_tools(mcp)
     register_workspace_tools(mcp)
+    register_weekly_report_tools(mcp)
