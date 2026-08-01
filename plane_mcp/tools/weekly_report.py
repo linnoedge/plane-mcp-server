@@ -17,6 +17,23 @@ from plane_mcp.work_item_cache import LEASE_SECONDS, WorkItemCache, sync_work_it
 DEFAULT_SYNC_TIMEOUT_SECONDS = LEASE_SECONDS + 60.0
 
 
+def _retry_plane_request(request: Any, timeout: float, initial_backoff: float, max_backoff: float) -> Any:
+    started = time.monotonic()
+    backoff = initial_backoff
+    while True:
+        try:
+            return request()
+        except HttpError as error:
+            if error.status_code != 429:
+                raise
+            elapsed = time.monotonic() - started
+            if elapsed >= timeout:
+                raise TimeoutError("Plane API remained rate limited") from error
+            delay = min(backoff, timeout - elapsed)
+            time.sleep(delay)
+            backoff = min(backoff * 2, max_backoff)
+
+
 def _timestamp(value: str, name: str) -> datetime:
     parsed = _parse_timestamp(value, name)
     if parsed is None:
@@ -88,12 +105,10 @@ def _metadata_results(response: Any, name: str) -> tuple[list[Any], str, bool, i
     results = page.get("results")
     if not isinstance(results, list):
         raise RuntimeError(f"invalid {name} metadata response")
-    next_cursor = page.get("next_cursor") or ""
     has_more = bool(page.get("next_page_results", page.get("has_more", False)))
-    if has_more != bool(next_cursor):
-        if has_more:
-            raise RuntimeError(f"unsafe {name} metadata continuation")
-        raise RuntimeError(f"inconsistent {name} metadata pagination")
+    next_cursor = (page.get("next_cursor") or "") if has_more else ""
+    if has_more and not next_cursor:
+        raise RuntimeError(f"unsafe {name} metadata continuation")
     total_count = page.get("total_count")
     if not isinstance(total_count, int) or total_count < 0:
         raise RuntimeError(f"invalid {name} metadata total_count")
@@ -173,8 +188,8 @@ def _collect_metadata(client: Any, workspace: str, projects: list[dict[str, Any]
                 "labels",
             )
         )
-        work_item_types.extend(
-            _paginated_metadata(
+        try:
+            project_types = _paginated_metadata(
                 lambda cursor, project_id=project_id: client.work_item_types.list(
                     workspace_slug=workspace,
                     project_id=project_id,
@@ -182,7 +197,11 @@ def _collect_metadata(client: Any, workspace: str, projects: list[dict[str, Any]
                 ),
                 "project work item types",
             )
-        )
+        except HttpError as error:
+            if error.status_code != 404:
+                raise
+            project_types = []
+        work_item_types.extend(project_types)
     return {
         "states": _deduplicate_metadata(states),
         "labels": _deduplicate_metadata(labels),
@@ -389,10 +408,14 @@ def _activity_history(
     workspace: str,
     project_id: str,
     work_item_id: str,
-    collection_started_at: str,
+    collection_started_at: datetime,
     page_size: int,
     max_pages: int,
+    retry_timeout: float,
+    retry_initial_backoff: float,
+    retry_max_backoff: float,
 ) -> tuple[list[dict[str, Any]], int]:
+
     cursor = None
     pages = 0
     activities = {}
@@ -407,11 +430,16 @@ def _activity_history(
         if pages >= max_pages:
             raise RuntimeError(f"activity pagination incomplete for work item {work_item_id}")
         page = _page_payload(
-            client.work_items.activities.list(
-                workspace_slug=workspace,
-                project_id=project_id,
-                work_item_id=work_item_id,
-                params={"cursor": cursor, "per_page": page_size, "order_by": "created_at"},
+            _retry_plane_request(
+                lambda cursor=cursor: client.work_items.activities.list(
+                    workspace_slug=workspace,
+                    project_id=project_id,
+                    work_item_id=work_item_id,
+                    params={"cursor": cursor, "per_page": page_size, "order_by": "created_at"},
+                ),
+                retry_timeout,
+                retry_initial_backoff,
+                retry_max_backoff,
             )
         )
         pages += 1
@@ -420,13 +448,11 @@ def _activity_history(
         results = page.get("results") or []
         if not isinstance(results, list):
             raise RuntimeError(f"invalid activity page for work item {work_item_id}")
-        next_cursor = page.get("next_cursor") or ""
         has_more = bool(page.get("next_page_results", page.get("has_more", False)))
         scan_has_more = bool(page.get("scan_has_more", has_more))
-        if has_more != bool(next_cursor):
-            if has_more:
-                raise RuntimeError(f"unsafe activity continuation for work item {work_item_id}")
-            raise RuntimeError(f"inconsistent activity pagination for work item {work_item_id}")
+        next_cursor = (page.get("next_cursor") or "") if scan_has_more else ""
+        if has_more and not next_cursor:
+            raise RuntimeError(f"unsafe activity continuation for work item {work_item_id}")
         total_count = page.get("total_count")
         if not isinstance(total_count, int) or total_count < 0:
             raise RuntimeError(f"invalid activity total_count for work item {work_item_id}")
@@ -594,6 +620,9 @@ def collect_weekly_report_bundle(
             normalized_effective_collection,
             activity_page_size,
             activity_max_pages,
+            sync_timeout_seconds,
+            retry_initial_backoff_seconds,
+            retry_max_backoff_seconds,
         )
         activity_pages += pages
         for activity in item_activities:
@@ -691,11 +720,14 @@ def register_weekly_report_tools(mcp: FastMCP) -> None:
 
         The collector fetches complete states, labels, and work item types metadata
         itself for every project and the workspace using Plane list APIs. Self-host
-        servers may return 404 for workspace work item types; project types remain
-        authoritative in that case. Paginated metadata APIs are followed to
-        completion, the collector deduplicates metadata by ID, and
-        the call fails rather than returning partial metadata when continuation is
-        missing, inconsistent, or exceeds its safety bound. Metadata and activity
+        servers may return 404 for workspace or project work item type endpoints;
+        this means the optional work item type feature is unavailable, so type metadata
+        is empty and candidates with no type_id remain valid. Paginated metadata APIs are followed to
+        completion using next_page_results as authoritative because self-host may
+        return a placeholder next_cursor on the final page. The collector deduplicates metadata by ID,
+        and the call fails rather than returning partial metadata when
+        a required continuation is missing or exceeds its safety bound. Activity
+        pagination applies the same final-page placeholder-cursor compatibility. Metadata and activity
         pagination require stable total_count on every page and an exact cumulative raw
         result count. The collector resolves every candidate state, label, and type UUID
         in the gathered metadata or the call fails closed.
@@ -703,7 +735,8 @@ def register_weekly_report_tools(mcp: FastMCP) -> None:
         A cache sync status of busy is retried until sync_timeout_seconds, whose
         180-second default exceeds the 120-second cache lease, using bounded
         exponential backoff beginning at retry_initial_backoff_seconds and
-        capped by retry_max_backoff_seconds. sync_max_pages bounds each cache sync.
+        capped by retry_max_backoff_seconds. The same timeout and backoff settings retry
+        HTTP 429 responses while fetching activity history. sync_max_pages bounds each cache sync.
         The call fails rather than returning partial data on timeout, a non-synced
         cache, exhausted candidate or activity page bounds, truncation, unsafe
         continuation, changing totals, or project/work-item mismatch.

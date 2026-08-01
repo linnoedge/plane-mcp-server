@@ -124,6 +124,46 @@ def _install_collection(monkeypatch, branch_pages, activity_pages, sync_results=
     return filter_calls, activity_calls, metadata_calls
 
 
+def test_rate_limited_plane_request_retries_with_bounded_backoff(monkeypatch):
+    responses = iter(
+        [
+            HttpError(status_code=429, message="Too Many Requests"),
+            HttpError(status_code=429, message="Too Many Requests"),
+            {"results": []},
+        ]
+    )
+    sleeps = []
+    times = iter([0.0, 0.0, 0.1, 0.1, 0.3])
+    monkeypatch.setattr(weekly_report_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(weekly_report_module.time, "monotonic", lambda: next(times))
+
+    def request():
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    result = weekly_report_module._retry_plane_request(request, 2, 0.1, 0.15)
+
+    assert result == {"results": []}
+    assert sleeps == [0.1, 0.15]
+
+
+def test_metadata_ignores_placeholder_cursor_when_server_says_no_next_page(monkeypatch):
+    pages = {
+        None: {
+            "results": [{"id": "state-1", "name": "Started"}],
+            "total_count": 1,
+            "next_cursor": "100:1:0",
+            "next_page_results": False,
+        }
+    }
+
+    results = weekly_report_module._paginated_metadata(lambda cursor: pages[cursor], "states")
+
+    assert results == [{"id": "state-1", "name": "Started"}]
+
+
 def test_self_host_missing_workspace_types_falls_back_to_project_types(monkeypatch):
     branch_pages = [[{"results": [], "total_count": 0}]] * 3
     _, _, metadata_calls = _install_collection(monkeypatch, branch_pages, {})
@@ -144,6 +184,28 @@ def test_self_host_missing_workspace_types_falls_back_to_project_types(monkeypat
 
     assert result["metadata"]["work_item_types"] == []
     assert any(name == "project_types" for name, _ in metadata_calls)
+
+
+def test_self_host_without_work_item_type_feature_accepts_both_type_endpoints_404(monkeypatch):
+    branch_pages = [[{"results": [], "total_count": 0}]] * 3
+    _install_collection(monkeypatch, branch_pages, {})
+    client, _ = weekly_report_module.get_plane_client_context()
+
+    def missing_types(**kwargs):
+        raise HttpError(status_code=404, message="Page not found")
+
+    client.workspace_work_item_types.list = missing_types
+    client.work_item_types.list = missing_types
+
+    result = collect_weekly_report_bundle(
+        _projects(),
+        _staff(),
+        "2026-07-27T00:00:00Z",
+        "2026-08-03T00:00:00Z",
+        "2026-08-03T12:00:00Z",
+    )
+
+    assert result["metadata"]["work_item_types"] == []
 
 
 def test_collects_exact_branches_paginates_deduplicates_and_shapes_aggregates(monkeypatch):
@@ -369,6 +431,32 @@ def test_rejects_changed_or_cumulatively_incomplete_metadata_total(monkeypatch):
                 "2026-08-03T00:00:00Z",
                 "2026-08-03T00:00:00Z",
             )
+
+
+def test_activity_pagination_ignores_placeholder_cursor_when_server_says_no_next_page(monkeypatch):
+    item = _item("item")
+    branch_pages = [
+        [{"results": [item], "total_count": 1}],
+        [{"results": [], "total_count": 0}],
+        [{"results": [], "total_count": 0}],
+    ]
+    activity_pages = {
+        "item": {
+            None: {
+                "results": [],
+                "total_count": 0,
+                "next_cursor": "100:1:0",
+                "next_page_results": False,
+            }
+        }
+    }
+    _install_collection(monkeypatch, branch_pages, activity_pages)
+
+    result = collect_weekly_report_bundle(
+        _projects(), _staff(), "2026-07-27T00:00:00Z", "2026-08-03T00:00:00Z", "2026-08-03T00:00:00Z"
+    )
+
+    assert result["activities"]["results"] == []
 
 
 def test_activity_pagination_uses_stable_total_cumulative_raw_count_and_ordering(monkeypatch):
@@ -702,10 +790,6 @@ def test_rejects_busy_timeout(monkeypatch):
             "unsafe activity continuation",
         ),
         (
-            {"results": [], "next_cursor": "unexpected", "next_page_results": False},
-            "inconsistent activity pagination",
-        ),
-        (
             {"results": [], "total_count": 1, "next_cursor": "", "next_page_results": False},
             "activity raw count mismatch",
         ),
@@ -768,6 +852,7 @@ def test_tools_list_exposes_comprehensive_description_and_schema():
         "timezone",
         "busy",
         "exponential backoff",
+        "HTTP 429",
         "complete",
         "does not write files",
         "normalizes work_item",
@@ -789,6 +874,10 @@ def test_tools_list_exposes_comprehensive_description_and_schema():
         "cumulative raw",
         "resolves every candidate state, label, and type UUID",
         "order_by=created_at",
+        "placeholder next_cursor",
+        "next_page_results as authoritative",
+        "workspace or project work item type endpoints",
+        "optional work item type feature is unavailable",
     ):
         assert text in tool.description
     properties = tool.inputSchema["properties"]
