@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastmcp import FastMCP
+from plane.errors.errors import HttpError
 from plane.models.query_params import WorkItemQueryParams
 
 from plane_mcp.client import get_plane_cache_scope, get_plane_client_context
@@ -141,10 +142,15 @@ def _deduplicate_metadata(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _collect_metadata(client: Any, workspace: str, projects: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     states = []
     labels = []
-    work_item_types = _paginated_metadata(
-        lambda cursor: client.workspace_work_item_types.list(workspace_slug=workspace),
-        "workspace work item types",
-    )
+    try:
+        work_item_types = _paginated_metadata(
+            lambda cursor: client.workspace_work_item_types.list(workspace_slug=workspace),
+            "workspace work item types",
+        )
+    except HttpError as error:
+        if error.status_code != 404:
+            raise
+        work_item_types = []
     for project in projects:
         project_id = project["id"]
         states.extend(
@@ -684,8 +690,10 @@ def register_weekly_report_tools(mcp: FastMCP) -> None:
         preserving old_value and new_value state names.
 
         The collector fetches complete states, labels, and work item types metadata
-        itself for every project and the workspace using Plane list APIs. Paginated
-        metadata APIs are followed to completion, deduplicates metadata by ID, and
+        itself for every project and the workspace using Plane list APIs. Self-host
+        servers may return 404 for workspace work item types; project types remain
+        authoritative in that case. Paginated metadata APIs are followed to
+        completion, the collector deduplicates metadata by ID, and
         the call fails rather than returning partial metadata when continuation is
         missing, inconsistent, or exceeds its safety bound. Metadata and activity
         pagination require stable total_count on every page and an exact cumulative raw

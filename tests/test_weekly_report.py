@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastmcp import Client, FastMCP
+from plane.errors.errors import HttpError
 
 import plane_mcp.tools.weekly_report as weekly_report_module
 from plane_mcp.tools.weekly_report import collect_weekly_report_bundle, register_weekly_report_tools
@@ -121,6 +122,28 @@ def _install_collection(monkeypatch, branch_pages, activity_pages, sync_results=
     monkeypatch.setattr(weekly_report_module, "get_plane_cache_scope", lambda: "scope")
     monkeypatch.setattr(weekly_report_module.os, "getenv", lambda name, default=None: default)
     return filter_calls, activity_calls, metadata_calls
+
+
+def test_self_host_missing_workspace_types_falls_back_to_project_types(monkeypatch):
+    branch_pages = [[{"results": [], "total_count": 0}]] * 3
+    _, _, metadata_calls = _install_collection(monkeypatch, branch_pages, {})
+    client, _ = weekly_report_module.get_plane_client_context()
+
+    def missing_workspace_types(**kwargs):
+        raise HttpError(status_code=404, message="Page not found")
+
+    client.workspace_work_item_types.list = missing_workspace_types
+
+    result = collect_weekly_report_bundle(
+        _projects(),
+        _staff(),
+        "2026-07-27T00:00:00Z",
+        "2026-08-03T00:00:00Z",
+        "2026-08-03T12:00:00Z",
+    )
+
+    assert result["metadata"]["work_item_types"] == []
+    assert any(name == "project_types" for name, _ in metadata_calls)
 
 
 def test_collects_exact_branches_paginates_deduplicates_and_shapes_aggregates(monkeypatch):
